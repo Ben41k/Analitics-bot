@@ -1,2 +1,4 @@
 .env
 .cursor
+node_modules/
+dist/
