@@ -1,19 +1,21 @@
 import { z } from 'zod';
 
+// Это Zod-схема. Она нужна, чтобы ПРОВЕРЯТЬ данные в рантайме (когда бот работает)
 export const MatchSchema = z.object({
   externalId: z.string(),
-  sport: z.enum(['football', 'hockey', 'basketball']),
-  league: z.string(),
   homeTeam: z.string(),
   awayTeam: z.string(),
-  date: z.date(),
+  date: z.coerce.date(), // Автоматически превратит строку из API в объект Date
+  league: z.string(),
+  sport: z.enum(['football', 'hockey', 'basketball']),
   odds: z.object({
-    home: z.number().optional(),
+    homeWin: z.number().optional(),
     draw: z.number().optional(),
-    away: z.number().optional(),
+    awayWin: z.number().optional(),
   }).optional(),
   rawContent: z.string().optional(),
 });
 
-// Ключевое слово export делает файл модулем
+// А это тип для TypeScript. Он заменяет твой "interface ScrapedMatch"
+// Теперь везде в коде ты будешь использовать тип Match
 export type Match = z.infer<typeof MatchSchema>;

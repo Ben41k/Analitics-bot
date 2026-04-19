@@ -22,6 +22,7 @@ model Match {
   externalId String   @unique
   homeTeam   String
   awayTeam   String
+  league     String   
   date       DateTime
   sport      String   @default("football")
   rawContent String  
