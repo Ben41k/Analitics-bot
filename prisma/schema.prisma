@@ -25,7 +25,7 @@ model Match {
   league     String   
   date       DateTime
   sport      String   @default("football")
-  rawContent String  
+  rawContent String?  
   embedding  Unsupported("vector(1536)")? 
 
   analyses   Analysis[]
