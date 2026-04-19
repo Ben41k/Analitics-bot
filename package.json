@@ -4,48 +4,49 @@
     "description": "AI-powered sports analytics Telegram bot",
     "main": "dist/core/app.js",
     "scripts": {
-      "dev": "tsx watch src/core/app.ts",
-      "build": "tsc",
-      "start": "node dist/core/app.js",
-      "lint": "eslint \"src/**/*.ts\" --fix",
-      "typecheck": "tsc --noEmit",
-      "prepare": "husky",
-      "test": "vitest run",
-      "prisma:generate": "prisma generate",
-      "prisma:migrate": "prisma migrate dev"
+        "dev": "tsx watch src/core/app.ts",
+        "build": "tsc",
+        "start": "node dist/core/app.js",
+        "lint": "eslint \"src/**/*.ts\" --fix",
+        "typecheck": "tsc --noEmit",
+        "prepare": "husky",
+        "test": "vitest run",
+        "prisma:generate": "prisma generate",
+        "prisma:migrate": "prisma migrate dev"
     },
     "keywords": [],
     "author": "Denis",
     "license": "ISC",
     "dependencies": {
-      "@grammyjs/hydrate": "^1.4.1",
-      "@prisma/client": "^5.12.1",
-      "dotenv": "^16.4.5",
-      "fastify": "^4.26.2",
-      "fastify-type-provider-zod": "^1.1.9",
-      "grammy": "^1.22.4",
-      "node-cron": "^3.0.3",
-      "pino": "^8.20.0",
-      "pino-pretty": "^11.0.0",
-      "playwright": "^1.43.0",
-      "zod": "^3.22.4"
+        "@grammyjs/hydrate": "^1.4.1",
+        "@prisma/client": "^5.12.1",
+        "axios": "^1.15.1",
+        "dotenv": "^16.4.5",
+        "fastify": "^4.26.2",
+        "fastify-type-provider-zod": "^1.1.9",
+        "grammy": "^1.22.4",
+        "node-cron": "^3.0.3",
+        "pino": "^8.20.0",
+        "pino-pretty": "^11.0.0",
+        "playwright": "^1.43.0",
+        "zod": "^3.22.4"
     },
     "devDependencies": {
-      "@types/node": "^20.12.7",
-      "@types/node-cron": "^3.0.11",
-      "eslint": "^8.57.0",
-      "husky": "^9.0.11",
-      "lint-staged": "^15.2.2",
-      "prisma": "^5.12.1",
-      "prettier": "^3.2.5",
-      "tsx": "^4.7.2",
-      "typescript": "^5.4.5",
-      "vitest": "^1.5.0"
+        "@types/node": "^20.12.7",
+        "@types/node-cron": "^3.0.11",
+        "eslint": "^8.57.0",
+        "husky": "^9.0.11",
+        "lint-staged": "^15.2.2",
+        "prettier": "^3.2.5",
+        "prisma": "^5.12.1",
+        "tsx": "^4.7.2",
+        "typescript": "^5.4.5",
+        "vitest": "^1.5.0"
     },
     "lint-staged": {
-      "src/**/*.ts": [
-        "eslint --fix",
-        "prettier --write"
-      ]
+        "src/**/*.ts": [
+            "eslint --fix",
+            "prettier --write"
+        ]
     }
-  }
+}

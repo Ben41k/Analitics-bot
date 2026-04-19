@@ -1,0 +1,15 @@
+{
+    "compilerOptions": {
+      "target": "ES2020",         /* Вот здесь мы разрешаем BigInt (n) */
+      "module": "CommonJS",
+      "lib": ["ES2020"],          /* И здесь тоже добавляем поддержку */
+      "outDir": "./dist",
+      "rootDir": "./src",
+      "strict": true,
+      "esModuleInterop": true,
+      "skipLibCheck": true,
+      "forceConsistentCasingInFileNames": true
+    },
+    "include": ["src/**/*"],
+    "exclude": ["node_modules"]
+  }
