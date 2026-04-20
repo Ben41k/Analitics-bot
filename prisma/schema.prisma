@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MatchStatus {
+  SCHEDULED
+  LIVE
+  FINISHED
+  POSTPONED
+  CANCELLED
+  SUSPENDED
+}
+
+model Match {
+  id              String      @id @default(uuid())
+  footballDataId  Int         @unique
+  homeTeamName    String
+  awayTeamName    String
+  kickoffUtc      DateTime
+  status          MatchStatus
+  competitionId   Int?
+  competitionName String?
+  seasonYear      Int?
+  flashscoreUrl   String?
+  rawContent      String?     @db.Text
+  analysis        Json?
+  /// pgvector column; read/write via $queryRaw in embedding/vector services
+  embedding       Unsupported("vector(1536)")?
+  isScraped       Boolean     @default(false)
+  isEmbedded      Boolean     @default(false)
+  isAnalyzed      Boolean     @default(false)
+  archivedAt      DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([kickoffUtc])
+  @@index([status, isAnalyzed, archivedAt])
+}
+
+model CronJobLock {
+  jobName     String   @id
+  lockedUntil DateTime
+  ownerId     String
+  updatedAt   DateTime @updatedAt
+}
