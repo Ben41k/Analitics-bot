@@ -1,10 +1,12 @@
 import { FootballDataProvider } from './providers/football-data.provider';
-import { FlashscoreProvider } from './providers/flashscore.provider'; // 1. Добавили импорт
+import { FlashscoreProvider } from './providers/flashscore.provider';
 import prisma from '../../core/database';
+// --- ВСТАВЛЯЕМ ИМПОРТ СХЕМЫ ЗДЕСЬ ---
+import { MatchSchema } from '../../schemas/match.schema';
 
 export class ScraperService {
   private footballApi = new FootballDataProvider();
-  private flashscore = new FlashscoreProvider(); // 2. Инициализировали провайдер
+  private flashscore = new FlashscoreProvider();
 
   async syncUpcomingMatches() {
     console.log('🔄 Начинаем синхронизацию матчей в БД...');
@@ -43,56 +45,52 @@ export class ScraperService {
   }
 
   private async enrichMatchesWithPreview() {
-    // 1. Ищем матчи в базе
     const matchesToEnrich = await prisma.match.findMany({
       where: {
-        OR: [
-          { rawContent: null },
-          { rawContent: '' }
-        ]
+        OR: [{ rawContent: null }, { rawContent: '' }]
       },
       take: 5,
       orderBy: { date: 'asc' }
     });
 
-    console.log(`📊 Найдено матчей для обогащения: ${matchesToEnrich.length}`);
+    if (matchesToEnrich.length === 0) return;
 
-    if (matchesToEnrich.length === 0) {
-      console.log('✅ Все матчи уже имеют превью.');
-      return;
-    }
-
-    // 2. Запускаем браузер один раз для всей пачки
     await this.flashscore.init();
 
-    // 3. ЦИКЛ: перебираем найденные матчи
     for (const match of matchesToEnrich) {
       console.log(`🔎 Ищем превью для: ${match.homeTeam} vs ${match.awayTeam}`);
       
       try {
         const preview = await this.flashscore.getMatchPreview(match.homeTeam, match.awayTeam);
         
-        if (preview && preview.length > 20) {
-          console.log(`✨ Текст получен (${preview.length} симв.). Записываем в БД...`);
+        // --- ЛОГИКА ВАЛИДАЦИИ ВСТАВЛЯЕТСЯ ТУТ ---
+        const validationResult = MatchSchema.safeParse({
+          externalId: match.externalId,
+          rawContent: preview,
+          provider: 'flashscore'
+        });
+
+        if (validationResult.success && validationResult.data.rawContent) {
           await prisma.match.update({
             where: { id: match.id },
-            data: { rawContent: preview }
+            data: { rawContent: validationResult.data.rawContent } 
           });
-          console.log(`✅ База обновлена для: ${match.homeTeam}`);
         } else {
-          console.log(`❌ Текст для ${match.homeTeam} не найден или слишком короткий.`);
-          // Помечаем, чтобы не пытаться парсить этот же матч в следующем цикле
+          // Если success: false ИЛИ rawContent пустой
+          console.warn(`⚠️ Ошибка валидации или пустой контент для ${match.homeTeam}`);
+          
           await prisma.match.update({
             where: { id: match.id },
             data: { rawContent: 'No preview available' }
           });
         }
+        // ----------------------------------------
+
       } catch (err) {
         console.error(`⚠️ Ошибка при обработке ${match.homeTeam}:`, err);
       }
     }
 
-    // 4. Закрываем браузер после всех матчей
     await this.flashscore.close();
   }
 }
