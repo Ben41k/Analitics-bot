@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { FootballDataProvider } from './providers/football-data.provider';
-import { FlashscoreProvider } from './providers/flashscore.provider';
+import { FlashscoreProvider, teamSearchNeedles } from './providers/flashscore.provider';
 import prisma from '../../core/database';
 
 function logPrismaUpdateError(context: string, err: unknown): void {
@@ -13,20 +13,20 @@ function logPrismaUpdateError(context: string, err: unknown): void {
   }
 }
 
-/** Мягкая релевантность: только первое слово названия, поиск в lower-тексте. */
+/** Релевантность: те же гибкие «иглы», что в скрапере (без «1.», FC/SC и т.д.). */
 export function isContentRelevant(rawText: string, homeTeam: string, awayTeam: string): boolean {
   const lower = rawText.toLowerCase();
-  const firstToken = (name: string) => (name.trim().split(/\s+/)[0] ?? '').toLowerCase();
   const label = (name: string) => {
     const w = name.trim().split(/\s+/)[0] ?? '';
     if (!w) return '?';
     return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
   };
 
-  const hTok = firstToken(homeTeam);
-  const aTok = firstToken(awayTeam);
-  const foundH = hTok.length > 0 && lower.includes(hTok);
-  const foundA = aTok.length > 0 && lower.includes(aTok);
+  const hits = (team: string) =>
+    teamSearchNeedles(team).some((needle) => needle.length >= 2 && lower.includes(needle));
+
+  const foundH = hits(homeTeam);
+  const foundA = hits(awayTeam);
 
   console.log(
     `[CHECK] Команда 1 (${label(homeTeam)}): ${foundH ? 'Найдена' : 'Не найдена'} | Команда 2 (${label(awayTeam)}): ${foundA ? 'Найдена' : 'Не найдена'}`,

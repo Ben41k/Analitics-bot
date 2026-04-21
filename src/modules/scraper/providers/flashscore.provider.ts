@@ -110,6 +110,90 @@ function isAdSearchResultUrl(href: string, baseUrl: string): boolean {
   return AD_URL_MARKERS.some((m) => full.includes(m));
 }
 
+/** Типичные префиксы клубов — не используем как единственную «иглу» для матча в тексте. */
+const TEAM_CLUB_ABBREV_TOKENS = new Set([
+  'fc',
+  'cf',
+  'ac',
+  'sc',
+  'ssc',
+  'afc',
+  'bfc',
+  'ffc',
+  'sv',
+  'bk',
+  'ts',
+  'if',
+  'sk',
+  'fk',
+  'tsv',
+  'rsc',
+  'nk',
+  'cd',
+  'us',
+  'vfl',
+  'vfb',
+  'rb',
+  'sg',
+  'ud',
+  'ssv',
+  'tsg',
+  'fsv',
+  'osc',
+  'asc',
+  'bsc',
+  'bc',
+  'svw',
+  'sgf',
+  'vflw',
+]);
+
+/**
+ * Подстроки для поиска названия команды в тексте страницы: без «1.», без FC/SC и т.д.,
+ * точки убраны, чтобы «1. FC Union Berlin» совпадал с «Union Berlin» / «union berlin».
+ */
+export function teamSearchNeedles(team: string): string[] {
+  const raw = team
+    .trim()
+    .toLowerCase()
+    .replace(/[''`]/g, ' ')
+    .replace(/\./g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = raw.split(' ').filter(Boolean);
+  const tokens: string[] = [];
+  for (const w of words) {
+    if (/^\d+$/.test(w)) continue;
+    if (TEAM_CLUB_ABBREV_TOKENS.has(w)) continue;
+    tokens.push(w);
+  }
+
+  const needles = new Set<string>();
+  if (tokens.length > 0) {
+    needles.add(tokens.join(' '));
+    if (tokens.length >= 2) {
+      needles.add(`${tokens[0]} ${tokens[1]}`);
+      needles.add(`${tokens[tokens.length - 2]} ${tokens[tokens.length - 1]}`);
+    }
+    for (const tok of tokens) {
+      if (tok.length >= 2) needles.add(tok);
+    }
+  }
+
+  if (needles.size === 0) {
+    const fallback = raw.replace(/\s+/g, ' ').trim();
+    if (fallback.length >= 2) return [fallback];
+    return [];
+  }
+
+  return [...needles].filter((n) => n.length >= 2);
+}
+
+/** Максимум переходов по органическим ссылкам из выдачи на один матч. */
+const MAX_PREVIEW_URL_ATTEMPTS = 5;
+
+export const NO_PREVIEW_PLACEHOLDER = 'No preview available';
+
 export class FlashscoreProvider {
   private context: BrowserContext | null = null;
 
@@ -278,18 +362,6 @@ export class FlashscoreProvider {
     return t.replace(/\s+/g, ' ').trim();
   }
 
-  /** Варианты названия для поиска: полное lower, первые два слова («West Ham»), первое слово. */
-  private static teamSearchNeedles(team: string): string[] {
-    const t = team.trim().toLowerCase();
-    if (t.length < 2) return [];
-    const words = t.split(/\s+/).filter(Boolean);
-    const needles = new Set<string>();
-    needles.add(t);
-    if (words.length >= 2) needles.add(`${words[0]} ${words[1]}`);
-    if (words.length >= 1) needles.add(words[0]);
-    return [...needles].filter((n) => n.length >= 2);
-  }
-
   /**
    * Агрессивный «бульдозер»: гибкие названия команд (lower + короткие формы), Preview/Match;
    * если ничего не найдено — самый крупный блок как «единственный контент»;
@@ -305,8 +377,8 @@ export class FlashscoreProvider {
       source: 'block' | 'body' | 'dominant';
     };
 
-    const homeNeedles = FlashscoreProvider.teamSearchNeedles(teamA);
-    const awayNeedles = FlashscoreProvider.teamSearchNeedles(teamB);
+    const homeNeedles = teamSearchNeedles(teamA);
+    const awayNeedles = teamSearchNeedles(teamB);
     const argJson = JSON.stringify({
       homeNeedles,
       awayNeedles,
@@ -492,12 +564,20 @@ export class FlashscoreProvider {
       );
 
       if (allowed.length === 0) {
-        throw new Error(
-          'Нет подходящих ссылок: отфильтрованы blacklist, рекламные URL или ссылки некорректны',
+        logger.warn(
+          'Нет подходящих ссылок в выдаче (blacklist / реклама / некорректные URL) — превью пропускаем.',
+        );
+        return NO_PREVIEW_PLACEHOLDER;
+      }
+
+      const toTry = allowed.slice(0, MAX_PREVIEW_URL_ATTEMPTS);
+      if (allowed.length > MAX_PREVIEW_URL_ATTEMPTS) {
+        logger.info(
+          `Органических ссылок ${allowed.length}, обрабатываем не более ${MAX_PREVIEW_URL_ATTEMPTS}.`,
         );
       }
 
-      for (const targetUrl of allowed) {
+      for (const targetUrl of toTry) {
         logger.info(`⏳ Переход на превью: ${targetUrl}`);
 
         const opened = await this.tryOpenArticleUrl(page, targetUrl);
@@ -534,8 +614,10 @@ export class FlashscoreProvider {
         return fullContentForAI;
       }
 
-      logger.error('❌ Все органические ссылки недоступны или вернули 403');
-      return '';
+      logger.warn(
+        `❌ За ${MAX_PREVIEW_URL_ATTEMPTS} попыток превью не собрано — переходим к следующему матчу.`,
+      );
+      return NO_PREVIEW_PLACEHOLDER;
     } catch (error: unknown) {
       if (error instanceof errors.TimeoutError) {
         await this.saveDebugScreenshot(page);
