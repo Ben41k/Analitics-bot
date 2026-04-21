@@ -152,28 +152,140 @@ const ONETRUST_SHADOW_CLICK_IN_PAGE = `
 })()
 `;
 
-const EXTRACT_PREVIEW_IN_PAGE = `
+/** Мгновенно скрыть крупные CMP-блоки (до кликов и strip), чтобы освободить экран. */
+const HIDE_OT_FC_CONSENT_IN_PAGE = `
 (function () {
-  var selectors = [
-    '.previewContent', '.matchPreview', '.description__text',
-    '[data-testid="wcl-scores-preview"]'
+  var sels = ['.ot-sdk-container', '.fc-consent-root'];
+  var k, i, nodes, el;
+  for (k = 0; k < sels.length; k++) {
+    nodes = document.querySelectorAll(sels[k]);
+    for (i = 0; i < nodes.length; i++) {
+      el = nodes[i];
+      if (!el) continue;
+      try {
+        el.style.setProperty('display', 'none', 'important');
+        el.style.setProperty('pointer-events', 'none', 'important');
+      } catch (e) {}
+    }
+  }
+})()
+`;
+
+/**
+ * Универсальные селекторы превью (Flashscore, Sports Mole и др.).
+ * Храним массивом — split по запятой ломает селекторы с запятыми внутри.
+ */
+const PREVIEW_CONTENT_SELECTORS: readonly string[] = [
+  '.preview-text-content',
+  '[data-testid="wcl-scores-preview"]',
+  '.description',
+  '.previewContent',
+  '.matchPreview',
+  '.article-body',
+  '#content_area',
+  '[class*="wcl-preview"]',
+  '[class*="main-content"]',
+  '.description__text',
+];
+
+const PREVIEW_CONTENT_SELECTOR = PREVIEW_CONTENT_SELECTORS.join(', ');
+
+/**
+ * Аварийный «текстовый дамп»: самый крупный блок div/section/article/p без навигационного мусора.
+ * Только строка для page.evaluate (без TS-колбэков → нет __name в esbuild/tsx).
+ */
+const TEXT_DUMP_FALLBACK_IN_PAGE = `
+(function () {
+  var tags = ['div', 'section', 'article', 'p'];
+  var nav = [
+    'privacy policy', 'cookie policy', 'terms of service', 'terms of use',
+    'log in', 'sign in', 'sign up', 'subscribe', 'newsletter', 'accessibility',
+    'gdpr', 'consent', 'advertisement', 'all rights reserved'
   ];
-  var s, el, t;
-  for (s = 0; s < selectors.length; s++) {
-    el = document.querySelector(selectors[s]);
-    if (el && el.textContent && el.textContent.trim().length > 100) {
-      return el.textContent.trim();
+  function isNav(t) {
+    var l = (t || '').toLowerCase();
+    var k;
+    for (k = 0; k < nav.length; k++) {
+      if (l.indexOf(nav[k]) !== -1) return true;
+    }
+    return false;
+  }
+  var bestLen = 0;
+  var bestText = '';
+  var ti, nodes, j, node, txt, len;
+  for (ti = 0; ti < tags.length; ti++) {
+    nodes = document.getElementsByTagName(tags[ti]);
+    for (j = 0; j < nodes.length; j++) {
+      node = nodes[j];
+      txt = (node.innerText || node.textContent || '').trim();
+      len = txt.length;
+      if (len <= 400) continue;
+      if (isNav(txt)) continue;
+      if (len > bestLen) {
+        bestLen = len;
+        bestText = txt;
+      }
     }
   }
-  var divs = document.querySelectorAll('div');
-  for (var d = 0; d < divs.length; d++) {
-    var node = divs[d];
-    var inner = (node.innerText || '').toLowerCase();
-    if ((inner.indexOf('preview') >= 0 || inner.indexOf('превью') >= 0) && (node.innerText || '').length > 150) {
-      return (node.innerText || '').trim();
+  if (bestText.length > 100) return bestText;
+  var body = (document.body && (document.body.innerText || document.body.textContent)) || '';
+  return (body || '').replace(/\\s+/g, ' ').trim();
+})()
+`;
+
+/** Узел с текстом Preview → following-sibling (часто блок превью рядом с заголовком). */
+const PREVIEW_XPATH_FOLLOWING_SIBLING =
+  'xpath=//*[contains(text(), "Preview") or contains(text(), "PREVIEW")]/following-sibling::*';
+
+/** Минимальная длина вырезанного текста, после которой считаем превью «догруженным». */
+const MIN_PREVIEW_TEXT_LENGTH = 100;
+
+/** Максимум символов `page.content()` в лог при пустом превью (защита логов). */
+const MAX_HTML_SNIPPET_FOR_LOG = 80_000;
+
+/** Скриншот отладки (относительно cwd процесса, обычно корень репозитория при `npm run`). */
+const DEBUG_SCREENSHOT_PATH = 'debug.png';
+
+/** Лимит innerHTML в console.log (полный HTML может завесить терминал). */
+const MAX_INNER_HTML_CONSOLE = 15_000;
+
+/** Уникальные class-токены, в которых встречается подстрока preview (регистронезависимо). */
+const LIST_PREVIEW_RELATED_CLASS_TOKENS_IN_PAGE = `
+(function () {
+  var seen = Object.create(null);
+  var out = [];
+  var all = document.querySelectorAll('*');
+  var i, j, el, tok;
+  var max = Math.min(all.length, 12000);
+  for (i = 0; i < max; i++) {
+    el = all[i];
+    if (!el || !el.classList) continue;
+    for (j = 0; j < el.classList.length; j++) {
+      tok = el.classList[j];
+      if (!tok || !/preview/i.test(tok)) continue;
+      if (seen[tok]) continue;
+      seen[tok] = 1;
+      out.push(tok);
     }
   }
-  return '';
+  return out;
+})()
+`;
+
+/** Эвристика: пустая страница или типичная заглушка / антибот Flashscore. */
+const DETECT_FLASHSCORE_STUB_IN_PAGE = `
+(function () {
+  var t = (document.body && document.body.innerText) ? document.body.innerText.trim() : '';
+  var html = (document.documentElement && document.documentElement.innerHTML)
+    ? document.documentElement.innerHTML.slice(0, 80000) : '';
+  var c = t + '\\n' + html;
+  if (t.length < 140) {
+    return { stub: true, reason: 'short_body', len: t.length, sample: t.slice(0, 600) };
+  }
+  if (/cloudflare|cf-ray|captcha|access denied|\\b403\\b|forbidden|robot|automated traffic|bot detected|are you a human|не робот|подтвердите|checking your browser|just a moment|enable javascript|cookies must be enabled|sorry.*blocked|unusual traffic/i.test(c)) {
+    return { stub: true, reason: 'anti_bot_or_block', sample: t.slice(0, 600) };
+  }
+  return { stub: false };
 })()
 `;
 
@@ -209,6 +321,7 @@ export class FlashscoreProvider {
    */
   private async handleOverlays(page: Page, rounds = 5) {
     for (let r = 0; r < rounds; r++) {
+      await page.evaluate(HIDE_OT_FC_CONSENT_IN_PAGE).catch(() => {});
       await this.dismissOverlaysOnce(page);
       await page.waitForTimeout(400);
     }
@@ -341,6 +454,320 @@ export class FlashscoreProvider {
     }
   }
 
+  private static escapeRe(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * Тело predicate для waitForFunction (строка = тело функции в странице, см. Playwright pageFunction string).
+   * Сигнал: есть узел по селектору ИЛИ в body.innerText видны обе команды.
+   */
+  private buildWaitForPreviewSignalScript(homeTeam: string, awayTeam: string): string {
+    const selectorsJson = JSON.stringify([...PREVIEW_CONTENT_SELECTORS]);
+    return `
+var selectors = ${selectorsJson};
+var home = ${JSON.stringify(homeTeam)};
+var away = ${JSON.stringify(awayTeam)};
+var i;
+for (i = 0; i < selectors.length; i++) {
+  try {
+    if (document.querySelector(selectors[i])) return true;
+  } catch (e) {}
+}
+var t = (document.body && document.body.innerText) || '';
+var hl = home.trim().toLowerCase();
+var al = away.trim().toLowerCase();
+if (hl.length < 2 || al.length < 2) return false;
+var tl = t.toLowerCase();
+return tl.indexOf(hl) !== -1 && tl.indexOf(al) !== -1;
+`;
+  }
+
+  /** Проверка «ключевых данных матча»: обе команды уже есть в innerText body. */
+  private buildBodyHasBothTeamsScript(homeTeam: string, awayTeam: string): string {
+    return `
+(function () {
+  var home = ${JSON.stringify(homeTeam)};
+  var away = ${JSON.stringify(awayTeam)};
+  var t = ((document.body && document.body.innerText) || '').toLowerCase();
+  var hl = home.trim().toLowerCase();
+  var al = away.trim().toLowerCase();
+  if (hl.length < 2 || al.length < 2) return false;
+  return t.indexOf(hl) !== -1 && t.indexOf(al) !== -1;
+})()
+`;
+  }
+
+  private async waitForPreviewDomReady(
+    page: Page,
+    timeoutMs: number,
+    homeTeam: string,
+    awayTeam: string,
+  ): Promise<void> {
+    await page.waitForFunction(this.buildWaitForPreviewSignalScript(homeTeam, awayTeam), undefined, {
+      timeout: timeoutMs,
+    });
+  }
+
+  private async readBodyInnerText(page: Page): Promise<string> {
+    const raw = await page.evaluate(
+      `(() => String((document.body && document.body.innerText) || ''))()`,
+    );
+    return String(raw).trim();
+  }
+
+  /** Сбор текста по известным CSS-селекторам превью (Playwright-локаторы, не в браузерной evaluate). */
+  private async collectPreviewFromSelectors(page: Page): Promise<string> {
+    let best = '';
+    for (const sel of PREVIEW_CONTENT_SELECTORS) {
+      try {
+        const loc = page.locator(sel);
+        const n = await loc.count();
+        if (n === 0) continue;
+        const txt = (await loc.first().innerText().catch(() => '')).trim();
+        if (txt.length > best.length) best = txt;
+      } catch {
+        /* */
+      }
+    }
+    return best;
+  }
+
+  /** Аварийный дамп, если селекторы и regex не дали достаточной длины. */
+  private async extractTextDumpFallback(page: Page): Promise<string> {
+    const raw = await page.evaluate(TEXT_DUMP_FALLBACK_IN_PAGE);
+    return String(raw ?? '').trim();
+  }
+
+  /**
+   * Вырезает блок превью из полного innerText body: сначала по именам команд, иначе по заголовку Preview.
+   */
+  private slicePreviewFromBody(full: string, homeTeam: string, awayTeam: string): string {
+    const t = (full || '').replace(/\r\n/g, '\n');
+    if (!t.trim()) return '';
+    const h = FlashscoreProvider.escapeRe(homeTeam.trim());
+    const a = FlashscoreProvider.escapeRe(awayTeam.trim());
+    if (h.length >= 2 && a.length >= 2) {
+      const combined = new RegExp(`${h}[\\s\\S]{0,500}?${a}|${a}[\\s\\S]{0,500}?${h}`, 'i');
+      const m = t.match(combined);
+      if (m && m[0].length >= 100) {
+        const i0 = Math.max(0, t.indexOf(m[0]) - 300);
+        return t.slice(i0, Math.min(t.length, i0 + 16000)).trim();
+      }
+    }
+    const block = t.match(
+      /(?:^|\n)[ \t]*[^\n]{0,120}(?:Preview|Превью)[^\n]*\n([\s\S]{100,16000}?)(?=\n[ \t]*(?:H2H|Lineups|Line-up|Summary|Odds|Betting|Изменения|Ставки)\b|\n{4,}|$)/i,
+    );
+    if (block?.[1]) return block[1].trim();
+    const idx = t.search(/preview|превью/i);
+    if (idx >= 0) return t.slice(idx, Math.min(t.length, idx + 16000)).trim();
+    return '';
+  }
+
+  /**
+   * Если на странице есть вкладка/кнопка «Preview», открываем её (часто контент грузится только после клика).
+   */
+  private async clickPreviewTabIfPresent(page: Page): Promise<void> {
+    const clickSelectors = [
+      'role=tab[name=/^preview$/i]',
+      'role=tab[name="Preview"]',
+      'role=button[name=/^preview$/i]',
+      'text=/^Preview$/',
+    ];
+    for (const sel of clickSelectors) {
+      try {
+        const loc = page.locator(sel).first();
+        if (!(await loc.isVisible({ timeout: 2200 }).catch(() => false))) continue;
+        await page.click(sel, { timeout: 6000 });
+        logger.info(`Вкладка/кнопка Preview: клик через page.click(${JSON.stringify(sel)})`);
+        await page.waitForTimeout(900);
+        return;
+      } catch {
+        /* пробуем следующий селектор */
+      }
+    }
+  }
+
+  private async logPreviewRelatedClassTokens(page: Page): Promise<void> {
+    try {
+      const tokens = (await page.evaluate(LIST_PREVIEW_RELATED_CLASS_TOKENS_IN_PAGE)) as string[];
+      console.log('[flashscore] class tokens containing "preview":', tokens);
+    } catch (e: unknown) {
+      console.log('[flashscore] не удалось собрать классы preview:', String(e));
+    }
+  }
+
+  /**
+   * Проверка на пустую страницу или заглушку при детекте бота (перед парсингом контента).
+   */
+  private async assertPageIsNotFlashscoreStub(page: Page): Promise<void> {
+    const res = (await page.evaluate(DETECT_FLASHSCORE_STUB_IN_PAGE)) as {
+      stub: boolean;
+      reason?: string;
+      len?: number;
+      sample?: string;
+    };
+    if (!res || !res.stub) return;
+    const detail = JSON.stringify(
+      { reason: res.reason, len: res.len, sample: res.sample },
+      null,
+      0,
+    );
+    throw new Error(`Flashscore вернул заглушку или блокировку (${detail})`);
+  }
+
+  /**
+   * Лёгкий скролл для lazy-load. Если в DOM уже есть обе команды — прекращаем сразу (без бесконечного скролла).
+   */
+  private async nudgeScrollForLazyLoad(
+    page: Page,
+    passes = 3,
+    homeTeam?: string,
+    awayTeam?: string,
+  ): Promise<void> {
+    for (let i = 0; i < passes; i++) {
+      if (homeTeam && awayTeam) {
+        const hasKey = (await page
+          .evaluate(this.buildBodyHasBothTeamsScript(homeTeam, awayTeam))
+          .catch(() => false)) as boolean;
+        if (hasKey === true) return;
+      }
+      await page.mouse.wheel(0, 550);
+      await page.waitForTimeout(320);
+      await page.mouse.wheel(0, -180);
+      await page.waitForTimeout(180);
+    }
+  }
+
+  /**
+   * Сбор превью: селекторы → body + regex; XPath; при длине < порога — текстовый дамп в странице.
+   */
+  private async extractPreviewFromAllContexts(
+    page: Page,
+    homeTeam: string,
+    awayTeam: string,
+  ): Promise<string> {
+    await page.evaluate(`(() => { window.scrollBy(0, 500); })()`).catch(() => {});
+
+    const fromSelectors = (await this.collectPreviewFromSelectors(page)).trim();
+    const full = await this.readBodyInnerText(page);
+    let best = this.slicePreviewFromBody(full, homeTeam, awayTeam);
+    if (fromSelectors.length > best.length) best = fromSelectors;
+
+    if (best.length < MIN_PREVIEW_TEXT_LENGTH) {
+      let xpathBlob = '';
+      try {
+        const loc = page.locator(PREVIEW_XPATH_FOLLOWING_SIBLING);
+        const n = await loc.count();
+        for (let i = 0; i < Math.min(n, 50); i++) {
+          xpathBlob += `${(await loc.nth(i).innerText().catch(() => '')).trim()}\n`;
+        }
+      } catch {
+        /* */
+      }
+      const fromXpath = this.slicePreviewFromBody(xpathBlob, homeTeam, awayTeam);
+      if (fromXpath.length > best.length) best = fromXpath;
+    }
+
+    if (best.length < MIN_PREVIEW_TEXT_LENGTH) {
+      const dumped = await this.extractTextDumpFallback(page);
+      if (dumped.length > best.length) best = dumped;
+    }
+
+    return best.trim();
+  }
+
+  /**
+   * Ожидание готовности: вкладка Preview → waitForFunction (селектор ИЛИ обе команды в body) → короткий poll.
+   */
+  private async waitForContentReady(
+    page: Page,
+    timeoutMs: number,
+    homeTeam: string,
+    awayTeam: string,
+  ): Promise<void> {
+    await this.clickPreviewTabIfPresent(page);
+
+    await this.waitForPreviewDomReady(page, timeoutMs, homeTeam, awayTeam);
+
+    const pollUntil = Date.now() + Math.min(timeoutMs, 45_000);
+    while (Date.now() < pollUntil) {
+      try {
+        await page.evaluate(`(() => { window.scrollBy(0, 500); })()`).catch(() => {});
+        const full = await this.readBodyInnerText(page);
+        const text = this.slicePreviewFromBody(full, homeTeam, awayTeam);
+        if (text.length > MIN_PREVIEW_TEXT_LENGTH) return;
+
+        const hasTeams = (await page
+          .evaluate(this.buildBodyHasBothTeamsScript(homeTeam, awayTeam))
+          .catch(() => false)) as boolean;
+        if (hasTeams === true) return;
+      } catch {
+        /* */
+      }
+      await this.nudgeScrollForLazyLoad(page, 1, homeTeam, awayTeam);
+      await page.waitForTimeout(450);
+    }
+
+    try {
+      const full = await this.readBodyInnerText(page);
+      const text = this.slicePreviewFromBody(full, homeTeam, awayTeam);
+      if (text.length > MIN_PREVIEW_TEXT_LENGTH) return;
+      const hasTeams = (await page
+        .evaluate(this.buildBodyHasBothTeamsScript(homeTeam, awayTeam))
+        .catch(() => false)) as boolean;
+      if (hasTeams === true) return;
+    } catch {
+      /* */
+    }
+
+    await this.logPreviewRelatedClassTokens(page);
+    throw new Error('Контент превью не готов: innerText не превысил порог за отведённое время');
+  }
+
+  /**
+   * Глубокая отладка: скриншот после оверлеев и перед чтением DOM + console по каждому селектору превью.
+   */
+  private async debugCaptureBeforeExtract(page: Page): Promise<void> {
+    try {
+      await page.screenshot({ path: DEBUG_SCREENSHOT_PATH });
+      logger.info(`Отладка: скриншот сохранён ${DEBUG_SCREENSHOT_PATH} (cwd: ${process.cwd()})`);
+    } catch (e: unknown) {
+      logger.warn(`Отладка: не удалось сохранить ${DEBUG_SCREENSHOT_PATH}: ${String(e)}`);
+    }
+
+    for (const selector of PREVIEW_CONTENT_SELECTORS) {
+      console.log(`[flashscore debug] selector: ${JSON.stringify(selector)}`);
+      const loc = page.locator(selector);
+      const count = await loc.count();
+      console.log('Elements found:', count);
+      const visible = await page.isVisible(selector).catch(() => false);
+      console.log('Is visible:', visible);
+      if (count > 0) {
+        const rawHtml = await loc.first().innerHTML().catch((err: unknown) => `(innerHTML error: ${String(err)})`);
+        const html =
+          typeof rawHtml === 'string' && rawHtml.length > MAX_INNER_HTML_CONSOLE
+            ? `${rawHtml.slice(0, MAX_INNER_HTML_CONSOLE)}...[truncated ${rawHtml.length - MAX_INNER_HTML_CONSOLE} chars]`
+            : rawHtml;
+        console.log(html);
+      } else {
+        console.log('(innerHTML: нет узлов, count === 0)');
+      }
+    }
+  }
+
+  private async logPageHtmlWhenPreviewEmpty(page: Page): Promise<void> {
+    const html = await page.content().catch(() => '');
+    const len = html.length;
+    const snippet =
+      len > MAX_HTML_SNIPPET_FOR_LOG
+        ? `${html.slice(0, MAX_HTML_SNIPPET_FOR_LOG)}\n...[truncated, total ${len} chars]...`
+        : html;
+    logger.warn(
+      `Превью пустое или слишком короткое; HTML страницы (${len} символов):\n${snippet}`,
+    );
+  }
+
   /**
    * Основной метод получения превью матча.
    */
@@ -358,7 +785,7 @@ export class FlashscoreProvider {
       
       logger.info(`🌐 Поиск через DuckDuckGo: ${homeTeam} - ${awayTeam}`);
       
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
+      await page.goto(searchUrl, { waitUntil: 'load', timeout: 45000 });
 
       await this.handleOverlays(page, 2);
 
@@ -385,31 +812,71 @@ export class FlashscoreProvider {
       }
       
       // Используем networkidle для гарантии подгрузки тяжелых скриптов
-      await page.goto(targetUrl, { 
-        waitUntil: 'networkidle', 
-        timeout: 45000 
-      }).catch(() => logger.info('⚠️ Networkidle не достигнут, продолжаем по таймауту...'));
+      await page.goto(targetUrl, {
+        waitUntil: 'load',
+        timeout: 45000,
+      }).catch(() => logger.info('⚠️ load не достигнут на Flashscore, продолжаем по таймауту...'));
 
-      // "Терпеливая" пауза для рендера динамики
-      await sleep(3000); 
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {
+        logger.info('⚠️ networkidle не достигнут, продолжаем (долгий рендер Flashscore)...');
+      });
+
+      // Доп. пауза для зон вроде detail_right_zone
+      await sleep(2000);
 
       // Очистка оверлеев перед чтением (несколько проходов — баннеры всплывают с задержкой)
       await this.handleOverlays(page);
 
-      // Ждем появления контента
-      logger.info('🔍 Ожидание блоков текста...');
-      await page.waitForSelector('.previewContent, .description, .description__text', { 
-        timeout: 20000,
-        state: 'attached'
-      }).catch(() => logger.info('🐌 Контент грузится долго, пробуем извлечь всё, что есть...'));
+      logger.info(
+        '🔍 Ожидание готовности контента (waitForFunction: селекторы или обе команды в body → poll)...',
+      );
+      await this.waitForContentReady(page, 75_000, homeTeam, awayTeam);
 
       await this.handleOverlays(page, 2);
 
-      const previewText = (await page.evaluate(EXTRACT_PREVIEW_IN_PAGE)) as string;
+      await this.nudgeScrollForLazyLoad(page, 4, homeTeam, awayTeam);
+      await this.handleOverlays(page, 1);
+
+      await this.assertPageIsNotFlashscoreStub(page);
+
+      await this.debugCaptureBeforeExtract(page);
+
+      let previewText = await this.extractPreviewFromAllContexts(page, homeTeam, awayTeam);
+      previewText = (previewText || '').trim();
+
+      if (!previewText) {
+        const allText = await this.readBodyInnerText(page);
+        const head = (allText || '').slice(0, 2000);
+        logger.warn(`Flashscore: пустой extract, дамп body.innerText (первые 2000 симв.): ${head}`);
+        const hasPreview = /preview|превью/i.test(allText || '');
+        const hn = homeTeam.trim();
+        const an = awayTeam.trim();
+        const hasTeams =
+          hn.length >= 2 &&
+          an.length >= 2 &&
+          (allText || '').toLowerCase().includes(hn.toLowerCase()) &&
+          (allText || '').toLowerCase().includes(an.toLowerCase());
+        logger.info(
+          `Flashscore дамп-анализ: есть Preview/Превью=${hasPreview}, видны обе команды=${hasTeams}`,
+        );
+      }
+
+      if (previewText.length < MIN_PREVIEW_TEXT_LENGTH) {
+        await this.logPageHtmlWhenPreviewEmpty(page);
+      }
 
       return previewText;
     } catch (error: any) {
       logger.error(`❌ Ошибка провайдера: ${error.message}`);
+      const msg = typeof error?.message === 'string' ? error.message : '';
+      if (
+        msg.includes('Блоки превью не появились') ||
+        msg.includes('Текст превью не стал достаточно длинным') ||
+        msg.includes('Контент превью не готов') ||
+        msg.includes('Flashscore вернул заглушку')
+      ) {
+        throw error;
+      }
       return '';
     } finally {
       if (!page.isClosed()) {
