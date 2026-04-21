@@ -2,11 +2,13 @@ FROM mcr.microsoft.com/playwright:v1.49.0-jammy
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm ci
+# В образе нет `.git`; `prepare` → husky иначе может завершиться с ошибкой.
+ENV HUSKY=0
 
+# `postinstall` запускает `prisma generate` — схема должна быть скопирована до `npm ci`.
+COPY package.json package-lock.json* ./
 COPY prisma ./prisma
-RUN npx prisma generate
+RUN npm ci
 
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src

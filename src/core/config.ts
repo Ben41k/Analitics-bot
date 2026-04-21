@@ -25,10 +25,27 @@ const envSchema = z.object({
   OPENAI_API_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   OPENAI_API_KEY: z.string().optional(),
 
+  /** OpenRouter рекомендует Referer; только если задаёте — уйдёт в заголовок при запросах к openrouter.ai */
+  OPENROUTER_HTTP_REFERER: z.string().url().optional(),
+  OPENROUTER_APP_TITLE: z.string().max(128).optional(),
+
   PRIMARY_REASONING_MODEL: z.string().min(1).default("gpt-4o-mini"),
   LONG_CONTEXT_MODEL: z.string().min(1).default("gpt-4o-mini"),
   EMBEDDING_MODEL: z.string().min(1).default("text-embedding-3-small"),
   EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().default(1536),
+  /** Доп. модели embeddings через запятую (после EMBEDDING_MODEL). Пусто — в коде fallback openai/text-embedding-3-small для OpenRouter-стека */
+  EMBEDDING_MODEL_FALLBACKS: z
+    .string()
+    .optional()
+    .transform((s) => {
+      if (s === undefined || s.trim() === "") {
+        return [] as string[];
+      }
+      return s
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+    }),
 
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_WEBHOOK_SECRET_PATH: z.string().min(8).default("change-me-please"),

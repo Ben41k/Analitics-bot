@@ -25,9 +25,10 @@
     "node": ">=20"
   },
   "dependencies": {
-    "fastify-type-provider-zod": "^5.1.0",
     "@prisma/client": "^6.7.0",
+    "dotenv": "^17.4.2",
     "fastify": "^5.2.1",
+    "fastify-type-provider-zod": "^5.1.0",
     "grammy": "^1.35.0",
     "node-cron": "^3.0.3",
     "pino": "^9.6.0",

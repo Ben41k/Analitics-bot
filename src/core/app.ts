@@ -46,7 +46,14 @@ export function buildApp(params: {
       }
 
       const handle = webhookCallback(bot, "fastify");
-      return handle(req, reply);
+      try {
+        await handle(req, reply);
+      } catch (err: unknown) {
+        params.logger.error({ err }, "Telegram webhook handler failed");
+        if (!reply.sent) {
+          return reply.code(500).send({ ok: false as const });
+        }
+      }
     });
   }
 

@@ -10,18 +10,50 @@ const embeddingResponseSchema = z.object({
   ),
 });
 
+/** Если в .env не задан список — пробуем OpenAI-совместимую модель на том же OpenRouter-ключе. */
+const DEFAULT_EMBEDDING_FALLBACKS = ["openai/text-embedding-3-small"] as const;
+
 export class EmbeddingService {
   constructor(
     private readonly config: AppConfig,
     private readonly logger: Logger,
   ) {}
 
-  async embedText(params: {
+  private embeddingModelChain(): string[] {
+    const fromEnv = this.config.EMBEDDING_MODEL_FALLBACKS;
+    const fallbacks = fromEnv.length > 0 ? fromEnv : [...DEFAULT_EMBEDDING_FALLBACKS];
+    const chain = [this.config.EMBEDDING_MODEL, ...fallbacks];
+    return [...new Set(chain)];
+  }
+
+  private embeddingRequestHeaders(): Record<string, string> {
+    const base = this.config.OPENAI_API_BASE_URL.replace(/\/+$/, "");
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.config.OPENAI_API_KEY ?? ""}`,
+      "Content-Type": "application/json",
+    };
+    if (base.includes("openrouter.ai")) {
+      if (this.config.OPENROUTER_HTTP_REFERER) {
+        headers["HTTP-Referer"] = this.config.OPENROUTER_HTTP_REFERER;
+      }
+      if (this.config.OPENROUTER_APP_TITLE) {
+        headers["X-Title"] = this.config.OPENROUTER_APP_TITLE;
+      }
+    }
+    return headers;
+  }
+
+  private async fetchEmbeddingForModel(params: {
     text: string;
     jobId: string;
+    model: string;
     signal?: AbortSignal;
   }): Promise<number[]> {
-    const log = this.logger.child({ jobId: params.jobId, module: "EmbeddingService" });
+    const log = this.logger.child({
+      jobId: params.jobId,
+      module: "EmbeddingService",
+      model: params.model,
+    });
     const apiKey = this.config.OPENAI_API_KEY;
     if (!apiKey) {
       throw new Error("OPENAI_API_KEY is not configured");
@@ -32,13 +64,11 @@ export class EmbeddingService {
 
     const res = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
+      headers: this.embeddingRequestHeaders(),
       body: JSON.stringify({
-        model: this.config.EMBEDDING_MODEL,
+        model: params.model,
         input: params.text,
+        dimensions: this.config.EMBEDDING_DIMENSIONS,
       }),
       signal: params.signal,
     });
@@ -49,7 +79,6 @@ export class EmbeddingService {
       throw new Error(`Embedding API error ${String(res.status)}: ${body.slice(0, 500)}`);
     }
 
-    // Boundary: embedding JSON is untrusted; narrow with Zod.
     const json: unknown = await res.json();
     const parsed = embeddingResponseSchema.safeParse(json);
     if (!parsed.success) {
@@ -69,5 +98,45 @@ export class EmbeddingService {
     }
 
     return embedding;
+  }
+
+  async embedText(params: {
+    text: string;
+    jobId: string;
+    signal?: AbortSignal;
+  }): Promise<number[]> {
+    const log = this.logger.child({ jobId: params.jobId, module: "EmbeddingService" });
+    const models = this.embeddingModelChain();
+    let lastErr: unknown;
+
+    for (let i = 0; i < models.length; i += 1) {
+      const model = models[i];
+      if (!model) {
+        continue;
+      }
+      try {
+        const vec = await this.fetchEmbeddingForModel({
+          text: params.text,
+          jobId: params.jobId,
+          model,
+          signal: params.signal,
+        });
+        if (i > 0) {
+          log.info({ model, index: i }, "Embedding succeeded after fallback model");
+        }
+        return vec;
+      } catch (err: unknown) {
+        lastErr = err;
+        const hasNext = i < models.length - 1;
+        if (hasNext) {
+          log.warn(
+            { err, model, nextModel: models[i + 1] },
+            "Embedding model failed; trying fallback",
+          );
+        }
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new Error("All embedding models failed");
   }
 }
