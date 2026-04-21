@@ -1,0 +1,7 @@
+2026/04/21-14:26:30.176 6730 Reusing MANIFEST C:\ben41k\projects\Analytics_bot\user_data\Default\IndexedDB\https_www.flashscore.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/04/21-14:26:30.176 6730 Recovering log #4
+2026/04/21-14:26:30.177 6730 Reusing old log C:\ben41k\projects\Analytics_bot\user_data\Default\IndexedDB\https_www.flashscore.com_0.indexeddb.leveldb/000004.log 
+2026/04/21-14:26:30.262 2d24 Level-0 table #8: started
+2026/04/21-14:26:30.277 2d24 Level-0 table #8: 657 bytes OK
+2026/04/21-14:26:30.280 2d24 Delete type=0 #4
+2026/04/21-14:26:30.281 6730 Manual compaction at level-0 from '\x00\x02\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x03\x00\x00\x00' @ 0 : 0; will stop at (end)

@@ -1,0 +1,6 @@
+2026/04/21-14:25:54.756 824 Creating DB C:\ben41k\projects\Analytics_bot\user_data\Default\IndexedDB\https_www.flashscore.com_0.indexeddb.leveldb since it was missing.
+2026/04/21-14:25:54.766 824 Reusing MANIFEST C:\ben41k\projects\Analytics_bot\user_data\Default\IndexedDB\https_www.flashscore.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/04/21-14:25:54.812 2d24 Level-0 table #5: started
+2026/04/21-14:25:54.832 2d24 Level-0 table #5: 665 bytes OK
+2026/04/21-14:25:54.835 2d24 Delete type=0 #3
+2026/04/21-14:25:54.836 6730 Manual compaction at level-0 from '\x00\x01\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x02\x00\x00\x00' @ 0 : 0; will stop at (end)
