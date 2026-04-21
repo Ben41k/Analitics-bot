@@ -35,6 +35,9 @@ export function isContentRelevant(rawText: string, homeTeam: string, awayTeam: s
   return foundH && foundA;
 }
 
+/** Сколько матчей без превью обрабатываем за один проход к БД (цикл повторяется, пока очередь не пуста). */
+const ENRICH_PREVIEW_BATCH_SIZE = 20;
+
 export class ScraperService {
   private footballApi = new FootballDataProvider();
   private flashscore = new FlashscoreProvider();
@@ -74,59 +77,94 @@ export class ScraperService {
       createdCount++;
     }
 
-    console.log(`✅ Синхронизация завершена! Обработано матчей: ${createdCount}`);
+    console.log(`✅ Импорт из API: upsert для ${createdCount} матчей (записи в БД обновлены/созданы).`);
 
-    // 3. ЗАПУСКАЕМ ПАРСИНГ ТЕКСТА
+    // 3. Обогащение превью — все матчи с пустым rawContent, порциями без жёсткого «только 5»
     await this.enrichMatchesWithPreview();
   }
 
   private async enrichMatchesWithPreview() {
-    const matchesToEnrich = await prisma.match.findMany({
-      where: {
-        OR: [{ rawContent: null }, { rawContent: '' }]
-      },
-      take: 5,
-      orderBy: { date: 'asc' }
-    });
+    let browserStarted = false;
+    let totalPreviewRuns = 0;
 
-    if (matchesToEnrich.length === 0) return;
+    for (;;) {
+      const matchesToEnrich = await prisma.match.findMany({
+        where: {
+          OR: [
+            { rawContent: null },
+            { rawContent: '' },
+            { rawContent: { contains: 'No preview available' } },
+          ],
+        },
+        take: ENRICH_PREVIEW_BATCH_SIZE,
+        orderBy: { date: 'asc' },
+      });
 
-    await this.flashscore.init();
-
-    for (const match of matchesToEnrich) {
-      console.log(`🔎 Ищем превью для: ${match.homeTeam} vs ${match.awayTeam}`);
-      
-      try {
-        // Единый текст для ИИ (SOURCE + METADATA + ARTICLE) пишем в Match.rawContent.
-        const preview = await this.flashscore.getMatchPreview(match.homeTeam, match.awayTeam);
-        const trimmed = (preview ?? '').trim();
-
-        if (trimmed.length > 0) {
-          const relevant = isContentRelevant(trimmed, match.homeTeam, match.awayTeam);
-          if (!relevant) {
-            console.log(
-              `[REJECT] Первые 500 симв. отклонённого текста:\n${trimmed.slice(0, 500)}`,
-            );
-          }
-        } else {
-          console.warn(`⚠️ Пустой контент для ${match.homeTeam} vs ${match.awayTeam}`);
+      if (matchesToEnrich.length === 0) {
+        if (!browserStarted) {
+          console.log(
+            'ℹ️ Нет матчей для превью (null, пусто или плейсхолдер «No preview available») — пропуск.',
+          );
         }
+        break;
+      }
 
-        const rawContentFinal = trimmed.length > 0 ? trimmed : 'No preview available';
+      if (!browserStarted) {
+        await this.flashscore.init();
+        browserStarted = true;
+      }
+
+      console.log(
+        `📥 Превью: порция из ${matchesToEnrich.length} матчей (батч до ${ENRICH_PREVIEW_BATCH_SIZE})…`,
+      );
+
+      for (const match of matchesToEnrich) {
+        console.log(`🔎 Ищем превью для: ${match.homeTeam} vs ${match.awayTeam}`);
 
         try {
-          console.log('DEBUG: Сохраняю в БД для ID:', match.id);
-          await prisma.match.update({
-            where: { id: match.id },
-            data: { rawContent: rawContentFinal },
-          });
+          const preview = await this.flashscore.getMatchPreview(match.homeTeam, match.awayTeam);
+          const trimmed = (preview ?? '').trim();
+
+          if (trimmed.length > 0) {
+            const relevant = isContentRelevant(trimmed, match.homeTeam, match.awayTeam);
+            if (!relevant) {
+              console.log(
+                `[REJECT] Первые 500 симв. отклонённого текста:\n${trimmed.slice(0, 500)}`,
+              );
+            }
+          } else {
+            console.warn(`⚠️ Пустой контент для ${match.homeTeam} vs ${match.awayTeam}`);
+          }
+
+          const rawContentFinal = trimmed.length > 0 ? trimmed : 'No preview available';
+
+          try {
+            console.log('DEBUG: Сохраняю в БД для ID:', match.id);
+            await prisma.match.update({
+              where: { id: match.id },
+              data: { rawContent: rawContentFinal },
+            });
+          } catch (err) {
+            logPrismaUpdateError(`match.update rawContent (id=${match.id})`, err);
+          }
         } catch (err) {
-          logPrismaUpdateError(`match.update rawContent (id=${match.id})`, err);
+          console.error(`⚠️ Ошибка при обработке матча (браузер не закрываем):`, err);
+          try {
+            await prisma.match.update({
+              where: { id: match.id },
+              data: { rawContent: 'No preview available' },
+            });
+          } catch (e2) {
+            logPrismaUpdateError(`match.update после ошибки скрапа (id=${match.id})`, e2);
+          }
         }
 
-      } catch (err) {
-        console.error(`⚠️ Ошибка при обработке матча (браузер не закрываем):`, err);
+        totalPreviewRuns++;
       }
+    }
+
+    if (browserStarted && totalPreviewRuns > 0) {
+      console.log(`✅ Обогащение превью: обработано попыток — ${totalPreviewRuns}`);
     }
   }
 }

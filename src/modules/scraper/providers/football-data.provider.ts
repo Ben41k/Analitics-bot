@@ -21,9 +21,15 @@ export class FootballDataProvider {
         }
       });
 
-      // Логируем заголовки лимитов
-      const requestsLeft = response.headers['x-requests-remaining'];
-      console.log(`📊 Лимиты API: осталось запросов - ${requestsLeft}`);
+      // Лимиты football-data.org v4: X-RequestsAvailable (axios даёт ключи в нижнем регистре)
+      const h = response.headers as Record<string, string | undefined>;
+      const requestsLeft =
+        h['x-requestsavailable'] ??
+        h['x-requests-remaining'] ??
+        h['x-ratelimit-remaining'];
+      console.log(
+        `📊 Лимиты API: осталось запросов — ${requestsLeft != null && requestsLeft !== '' ? requestsLeft : 'n/a (заголовок не пришёл)'}`,
+      );
 
       return response.data.matches;
     } catch (error: any) {

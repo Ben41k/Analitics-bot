@@ -1,5 +1,9 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+import { chromium } from 'playwright-extra';
+import stealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { BrowserContext, Page, errors } from 'playwright';
 import { logger } from '../../../core/logger';
+
+chromium.use(stealthPlugin());
 
 /** Навигационный шум, который вычищаем из собранного текста. */
 const NAV_PHRASES: readonly string[] = [
@@ -40,7 +44,7 @@ const AD_URL_MARKERS = ['ad_domain', 'aclick', 'ad_provider', 'googleadservices'
 const MAX_ARTICLE_TEXT_LENGTH = 8000;
 
 const CHROME_DESKTOP_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 /** Типичные оверлеи (в т.ч. WordPress-попапы) — удаляем перед сбором текста. */
 const OVERLAY_ROOT_SELECTORS = ['.wp-popup', '.wp-modal'] as const;
@@ -48,6 +52,9 @@ const OVERLAY_ROOT_SELECTORS = ['.wp-popup', '.wp-modal'] as const;
 /** Таймаут навигации и на сбор контента со страницы (мс). */
 const GOTO_TIMEOUT_MS = 30_000;
 const EXTRACT_DEADLINE_MS = 30_000;
+
+const DDG_SPA_REFERER = 'https://www.google.com/';
+const DDG_HTML_REFERER = 'https://duckduckgo.com/';
 
 /**
  * Удаление fixed-слоёв с большим z-index — только строка для evaluate (без TS в браузере → нет __name).
@@ -117,6 +124,96 @@ export class FlashscoreProvider {
       .catch(() => {});
   }
 
+  private async saveDebugScreenshot(page: Page): Promise<void> {
+    if (page.isClosed()) return;
+    await page.screenshot({ path: 'debug-screenshot.png' }).catch(() => {});
+  }
+
+  private async jitterBeforeSearch(page: Page): Promise<void> {
+    await page.waitForTimeout(Math.random() * 3000 + 1000);
+  }
+
+  private async isDdgBlockedOrErrorPage(page: Page): Promise<boolean> {
+    const t = (await page.locator('body').innerText().catch(() => '')) ?? '';
+    return (
+      /unexpected error/i.test(t) ||
+      /Unfortunately, bots use DuckDuckGo/i.test(t) ||
+      /made by a human/i.test(t)
+    );
+  }
+
+  /**
+   * Основная выдача duckduckgo.com (SPA).
+   * @returns `null` — нужен fallback на html.duckduckgo.com/html/
+   */
+  private async collectDdgSpaResultHrefs(page: Page, searchUrl: string): Promise<string[] | null> {
+    await page.goto(searchUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: GOTO_TIMEOUT_MS,
+      referer: DDG_SPA_REFERER,
+    });
+    await this.handleOverlays(page);
+    await page.waitForLoadState('networkidle', { timeout: GOTO_TIMEOUT_MS }).catch(() => {});
+
+    if (await this.isDdgBlockedOrErrorPage(page)) {
+      logger.warn(
+        'DuckDuckGo (SPA): блокировка или Unexpected error — переключаемся на html.duckduckgo.com/html/',
+      );
+      return null;
+    }
+
+    const anchors = page.locator('a[data-testid="result-title-a"]');
+    const n = await anchors.count();
+    if (n === 0) {
+      logger.warn('DuckDuckGo (SPA): нет ссылок результатов — переключаемся на html.duckduckgo.com/html/');
+      return null;
+    }
+
+    const hrefs: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const h = await anchors.nth(i).getAttribute('href');
+      if (h) hrefs.push(h);
+    }
+    return hrefs;
+  }
+
+  /** Классическая HTML-выдача (меньше JS, другой путь на сервере DDG). */
+  private async collectDdgHtmlResultHrefs(page: Page, homeTeam: string, awayTeam: string): Promise<string[]> {
+    const q = `${homeTeam} vs ${awayTeam} match preview -site:flashscore.com`;
+    const htmlUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+    logger.info('🌐 Поиск через html.duckduckgo.com/html/');
+
+    await this.jitterBeforeSearch(page);
+    await page.goto(htmlUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: GOTO_TIMEOUT_MS,
+      referer: DDG_HTML_REFERER,
+    });
+    await this.handleOverlays(page);
+
+    if (await this.isDdgBlockedOrErrorPage(page)) {
+      logger.warn('DuckDuckGo HTML: капча или сообщение о боте');
+      return [];
+    }
+
+    const anchors = page.locator('a.result__a');
+    await anchors.first().waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
+
+    const n = await anchors.count();
+    const hrefs: string[] = [];
+    const base = page.url();
+    for (let i = 0; i < n; i++) {
+      const h = await anchors.nth(i).getAttribute('href');
+      if (!h) continue;
+      try {
+        hrefs.push(new URL(h, base).href);
+      } catch {
+        hrefs.push(h);
+      }
+    }
+    return hrefs;
+  }
+
   /**
    * Инициализация контекста.
    * В Docker используем headless: true и отключаем детекцию автоматизации.
@@ -129,19 +226,25 @@ export class FlashscoreProvider {
     }
 
     this.context = await chromium.launchPersistentContext('user_data', {
-      headless: false,
+      headless: true,
       userAgent: CHROME_DESKTOP_UA,
-      locale: 'en-US',
+      locale: 'ru-RU',
+      timezoneId: 'Europe/Moscow',
+      extraHTTPHeaders: {
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+      },
       args: [
         '--disable-blink-features=AutomationControlled',
         '--disable-infobars',
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--lang=en-US',
+        '--lang=ru-RU',
+        // Встроенный перевод Chrome и панель Translate
         '--disable-features=Translate,TranslateUI',
         '--disable-translate',
       ],
-      viewport: { width: 1280, height: 720 },
+      viewport: { width: 1920, height: 1080 },
+      screen: { width: 1920, height: 1080 },
     });
   }
 
@@ -302,6 +405,9 @@ export class FlashscoreProvider {
       }
       return 'ok';
     } catch (e: unknown) {
+      if (e instanceof errors.TimeoutError) {
+        throw e;
+      }
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('403') || /forbidden/i.test(msg)) {
         logger.warn('403 Forbidden');
@@ -363,7 +469,6 @@ export class FlashscoreProvider {
 
     try {
       page.setDefaultTimeout(GOTO_TIMEOUT_MS + 5000);
-      await this.blockHeavyAssets(page);
 
       const searchQuery = encodeURIComponent(
         `${homeTeam} vs ${awayTeam} match preview -site:flashscore.com`,
@@ -372,21 +477,15 @@ export class FlashscoreProvider {
 
       logger.info(`🌐 Поиск через DuckDuckGo: ${homeTeam} - ${awayTeam}`);
 
-      await this.humanPauseBeforeNavigation();
-      await page.goto(searchUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: GOTO_TIMEOUT_MS,
-      });
-      await this.handleOverlays(page);
-
-      const anchors = page.locator('a[data-testid="result-title-a"]');
-      await anchors.first().waitFor({ state: 'visible', timeout: 20000 });
-      const n = await anchors.count();
-      const hrefs: string[] = [];
-      for (let i = 0; i < n; i++) {
-        const h = await anchors.nth(i).getAttribute('href');
-        if (h) hrefs.push(h);
+      await this.jitterBeforeSearch(page);
+      const spaHrefs = await this.collectDdgSpaResultHrefs(page, searchUrl);
+      let hrefs = spaHrefs ?? [];
+      if (hrefs.length === 0) {
+        hrefs = await this.collectDdgHtmlResultHrefs(page, homeTeam, awayTeam);
       }
+
+      await this.blockHeavyAssets(page);
+
       const allowed = hrefs.filter(
         (h) =>
           !isBlacklistedPreviewUrl(h, page.url()) && !isAdSearchResultUrl(h, page.url()),
@@ -429,12 +528,19 @@ export class FlashscoreProvider {
           `Скачанный текст (первые 200 симв.): ${head}${fullContentForAI.length > 200 ? '…' : ''}`,
         );
 
+        if (!page.isClosed()) {
+          await page.close();
+        }
         return fullContentForAI;
       }
 
       logger.error('❌ Все органические ссылки недоступны или вернули 403');
       return '';
     } catch (error: unknown) {
+      if (error instanceof errors.TimeoutError) {
+        await this.saveDebugScreenshot(page);
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`❌ Ошибка провайдера: ${message}`);
       return '';
