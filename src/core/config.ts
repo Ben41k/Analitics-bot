@@ -19,9 +19,27 @@ const configSchema = z.object({
   // Telegram
   BOT_TOKEN: z.string().min(10, 'BOT_TOKEN is required and must be valid'),
   
-  // AI Модели (Используем роли, как договаривались в архитектуре)
-  PRIMARY_REASONING_MODEL: z.string().default('gpt-4o'), // или claude-3-5-sonnet
-  LONG_CONTEXT_MODEL: z.string().default('gpt-4o-mini'),
+  // LLM через OpenRouter (OpenAI-совместимый /chat/completions). Слаги моделей: https://openrouter.ai/models
+  LLM_BASE_URL: z
+    .string()
+    .url()
+    .default('https://openrouter.ai/api/v1'),
+  OPENROUTER_API_KEY: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.string().min(1).optional(),
+  ),
+  /** Сайт приложения (рекомендует OpenRouter для рейтинга/идентификации) */
+  OPENROUTER_HTTP_REFERER: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.string().url().optional(),
+  ),
+  OPENROUTER_APP_TITLE: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.string().optional(),
+  ),
+  // Роли моделей — значения в формате OpenRouter, напр. openai/gpt-4o, anthropic/claude-3.5-sonnet
+  PRIMARY_REASONING_MODEL: z.string().default('openai/gpt-4o'),
+  LONG_CONTEXT_MODEL: z.string().default('openai/gpt-4o-mini'),
   
   // Логирование
   LOG_LEVEL: z.enum(['info', 'error', 'debug', 'trace']).default('info'),

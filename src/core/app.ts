@@ -1,17 +1,8 @@
 import 'dotenv/config';
-import { ScraperService } from '../modules/scraper/scraper.service';
+import { startBot } from './bot';
+import { logger } from './logger';
 
-async function bootstrap() {
-  try {
-    const scraper = new ScraperService();
-    
-    console.log('🚀 Аналитический движок запущен...');
-    await scraper.syncUpcomingMatches();
-    
-    console.log('🏁 Работа завершена успешно.');
-  } catch (error) {
-    console.error('❌ Критическая ошибка:', error);
-  }
-}
-
-bootstrap();
+startBot().catch((e) => {
+  logger.error(e, 'Критическая ошибка при запуске бота');
+  process.exit(1);
+});

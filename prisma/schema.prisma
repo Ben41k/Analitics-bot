@@ -37,6 +37,7 @@ model Analysis {
   userId     BigInt
   result     String   @db.Text
   prediction String?
+  confidence Int?
   createdAt  DateTime @default(now())
 
   match      Match    @relation(fields: [matchId], references: [id])

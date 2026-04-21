@@ -5,6 +5,8 @@
     "main": "dist/core/app.js",
     "scripts": {
         "dev": "tsx watch src/core/app.ts",
+        "dev:bot": "tsx watch src/core/app.ts",
+        "scrape": "tsx src/scripts/sync-matches.ts",
         "build": "tsc",
         "start": "node dist/core/app.js",
         "lint": "eslint \"src/**/*.ts\" --fix",
