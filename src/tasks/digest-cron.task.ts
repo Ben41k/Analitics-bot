@@ -26,12 +26,14 @@ export async function runDigestJob(bot: Bot, analyzer: AnalyzerService): Promise
   logger.info('Крон: запуск дайджеста матчей');
 
   if (config.CRON_RUN_SCRAPE) {
+    const scraper = new ScraperService();
     try {
-      const scraper = new ScraperService();
       await scraper.syncUpcomingMatches();
       logger.info('Крон: синхронизация матчей завершена');
     } catch (e) {
       logger.error(e, 'Крон: ошибка синхронизации матчей');
+    } finally {
+      await scraper.closeScraperBrowser();
     }
   }
 

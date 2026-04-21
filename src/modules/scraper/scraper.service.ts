@@ -13,9 +13,36 @@ function logPrismaUpdateError(context: string, err: unknown): void {
   }
 }
 
+/** Мягкая релевантность: только первое слово названия, поиск в lower-тексте. */
+export function isContentRelevant(rawText: string, homeTeam: string, awayTeam: string): boolean {
+  const lower = rawText.toLowerCase();
+  const firstToken = (name: string) => (name.trim().split(/\s+/)[0] ?? '').toLowerCase();
+  const label = (name: string) => {
+    const w = name.trim().split(/\s+/)[0] ?? '';
+    if (!w) return '?';
+    return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  };
+
+  const hTok = firstToken(homeTeam);
+  const aTok = firstToken(awayTeam);
+  const foundH = hTok.length > 0 && lower.includes(hTok);
+  const foundA = aTok.length > 0 && lower.includes(aTok);
+
+  console.log(
+    `[CHECK] Команда 1 (${label(homeTeam)}): ${foundH ? 'Найдена' : 'Не найдена'} | Команда 2 (${label(awayTeam)}): ${foundA ? 'Найдена' : 'Не найдена'}`,
+  );
+
+  return foundH && foundA;
+}
+
 export class ScraperService {
   private footballApi = new FootballDataProvider();
   private flashscore = new FlashscoreProvider();
+
+  /** Закрыть браузер скрапера — вызывать один раз в конце `sync-matches.ts`. */
+  async closeScraperBrowser(): Promise<void> {
+    await this.flashscore.close();
+  }
 
   async syncUpcomingMatches() {
     console.log('🔄 Начинаем синхронизацию матчей в БД...');
@@ -75,31 +102,31 @@ export class ScraperService {
         const trimmed = (preview ?? '').trim();
 
         if (trimmed.length > 0) {
-          try {
-            await prisma.match.update({
-              where: { id: match.id },
-              data: { rawContent: trimmed },
-            });
-          } catch (err) {
-            logPrismaUpdateError(`match.update rawContent (id=${match.id})`, err);
+          const relevant = isContentRelevant(trimmed, match.homeTeam, match.awayTeam);
+          if (!relevant) {
+            console.log(
+              `[REJECT] Первые 500 симв. отклонённого текста:\n${trimmed.slice(0, 500)}`,
+            );
           }
         } else {
           console.warn(`⚠️ Пустой контент для ${match.homeTeam} vs ${match.awayTeam}`);
-          try {
-            await prisma.match.update({
-              where: { id: match.id },
-              data: { rawContent: 'No preview available' },
-            });
-          } catch (err) {
-            logPrismaUpdateError(`match.update placeholder (id=${match.id})`, err);
-          }
+        }
+
+        const rawContentFinal = trimmed.length > 0 ? trimmed : 'No preview available';
+
+        try {
+          console.log('DEBUG: Сохраняю в БД для ID:', match.id);
+          await prisma.match.update({
+            where: { id: match.id },
+            data: { rawContent: rawContentFinal },
+          });
+        } catch (err) {
+          logPrismaUpdateError(`match.update rawContent (id=${match.id})`, err);
         }
 
       } catch (err) {
-        console.error(`⚠️ Ошибка при обработке ${match.homeTeam}:`, err);
+        console.error(`⚠️ Ошибка при обработке матча (браузер не закрываем):`, err);
       }
     }
-
-    await this.flashscore.close();
   }
 }

@@ -5,7 +5,11 @@ import { logger } from '../core/logger';
 async function main() {
   const scraper = new ScraperService();
   logger.info('Синхронизация матчей…');
-  await scraper.syncUpcomingMatches();
+  try {
+    await scraper.syncUpcomingMatches();
+  } finally {
+    await scraper.closeScraperBrowser();
+  }
   logger.info('Синхронизация завершена.');
 }
 

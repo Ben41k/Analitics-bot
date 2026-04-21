@@ -33,8 +33,26 @@ const MAX_HTML_SNIPPET_FOR_LOG = 80_000;
 /** Подстроки в hostname — такие результаты поиска не открываем. */
 const blacklistDomains = ['flashscore', 'livescore'] as const;
 
+/** Маркеры рекламы / неорганики в URL результатов DuckDuckGo. */
+const AD_URL_MARKERS = ['ad_domain', 'aclick', 'ad_provider', 'googleadservices'] as const;
+
+/** Максимум символов в теле статьи для ИИ (ARTICLE CONTENT). */
+const MAX_ARTICLE_TEXT_LENGTH = 8000;
+
+const CHROME_DESKTOP_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
 /** Типичные оверлеи (в т.ч. WordPress-попапы) — удаляем перед сбором текста. */
 const OVERLAY_ROOT_SELECTORS = ['.wp-popup', '.wp-modal'] as const;
+
+/** Таймаут навигации и на сбор контента со страницы (мс). */
+const GOTO_TIMEOUT_MS = 30_000;
+const EXTRACT_DEADLINE_MS = 30_000;
+
+/**
+ * Удаление fixed-слоёв с большим z-index — только строка для evaluate (без TS в браузере → нет __name).
+ */
+const EVAL_STRIP_FIXED_HIGH_Z = `(function(){var nodes=document.querySelectorAll('*');for(var i=0;i<nodes.length;i++){var el=nodes[i];if(!el||el.nodeType!==1)continue;var cs=window.getComputedStyle(el);if(cs.position!=='fixed')continue;var z=parseInt(cs.zIndex||'0',10)||0;if(!isFinite(z)||z<=100)continue;try{el.remove();}catch(e0){}}})()`;
 
 /** Мета из `<head>` для блока METADATA в ответе для ИИ. */
 export interface MatchPageMetadata {
@@ -75,18 +93,44 @@ function isBlacklistedPreviewUrl(href: string, baseUrl: string): boolean {
   }
 }
 
+function isAdSearchResultUrl(href: string, baseUrl: string): boolean {
+  let full = '';
+  try {
+    full = new URL(href, baseUrl).href.toLowerCase();
+  } catch {
+    full = href.toLowerCase();
+  }
+  return AD_URL_MARKERS.some((m) => full.includes(m));
+}
+
 export class FlashscoreProvider {
   private context: BrowserContext | null = null;
+
+  private async humanPauseBeforeNavigation(): Promise<void> {
+    await new Promise((r) => setTimeout(r, Math.random() * 2000 + 1000));
+  }
+
+  /** Меньше «шумных» запросов (картинки, шрифты) — снижает риск триггеров антибота. */
+  private async blockHeavyAssets(page: Page): Promise<void> {
+    await page
+      .route('**/*.{png,jpg,jpeg,svg,woff,woff2}', (route) => route.abort())
+      .catch(() => {});
+  }
 
   /**
    * Инициализация контекста.
    * В Docker используем headless: true и отключаем детекцию автоматизации.
    */
   async init() {
-    if (this.context) return;
+    if (this.context) {
+      const br = this.context.browser();
+      if (br && br.isConnected()) return;
+      await this.close();
+    }
 
     this.context = await chromium.launchPersistentContext('user_data', {
       headless: false,
+      userAgent: CHROME_DESKTOP_UA,
       locale: 'en-US',
       args: [
         '--disable-blink-features=AutomationControlled',
@@ -108,38 +152,15 @@ export class FlashscoreProvider {
     for (let i = 0; i < 3; i++) {
       await page.keyboard.press('Escape').catch(() => {});
     }
-    await page.evaluate(() => {
-      const nodes = document.querySelectorAll('*');
-      for (let i = 0; i < nodes.length; i++) {
-        const el = nodes[i];
-        if (!el || el.nodeType !== Node.ELEMENT_NODE) continue;
-        const cs = window.getComputedStyle(el as Element);
-        if (cs.position !== 'fixed') continue;
-        const z = parseInt(cs.zIndex || '0', 10);
-        if (!Number.isFinite(z) || z <= 100) continue;
-        try {
-          (el as Element).remove();
-        } catch {
-          /* */
-        }
-      }
-    }).catch(() => {});
+    await page.evaluate(EVAL_STRIP_FIXED_HIGH_Z).catch(() => {});
   }
 
   /** Удаление известных корневых оверлеев перед извлечением meta / DOM-текста. */
   private async stripKnownOverlayRoots(page: Page) {
-    await page.evaluate((selectors) => {
-      for (let s = 0; s < selectors.length; s++) {
-        const nodes = document.querySelectorAll(selectors[s]);
-        for (let i = 0; i < nodes.length; i++) {
-          try {
-            nodes[i].remove();
-          } catch {
-            /* */
-          }
-        }
-      }
-    }, [...OVERLAY_ROOT_SELECTORS]);
+    const selJson = JSON.stringify([...OVERLAY_ROOT_SELECTORS]);
+    await page.evaluate(
+      `(function(){var sel=${selJson};for(var s=0;s<sel.length;s++){var nodes=document.querySelectorAll(sel[s]);for(var i=0;i<nodes.length;i++){try{nodes[i].remove();}catch(e1){}}}})()`,
+    );
   }
 
   private cleanPreviewText(raw: string): string {
@@ -154,9 +175,23 @@ export class FlashscoreProvider {
     return t.replace(/\s+/g, ' ').trim();
   }
 
+  /** Варианты названия для поиска: полное lower, первые два слова («West Ham»), первое слово. */
+  private static teamSearchNeedles(team: string): string[] {
+    const t = team.trim().toLowerCase();
+    if (t.length < 2) return [];
+    const words = t.split(/\s+/).filter(Boolean);
+    const needles = new Set<string>();
+    needles.add(t);
+    if (words.length >= 2) needles.add(`${words[0]} ${words[1]}`);
+    if (words.length >= 1) needles.add(words[0]);
+    return [...needles].filter((n) => n.length >= 2);
+  }
+
   /**
-   * Агрессивный «бульдозер»: слабый фильтр (команда / Preview / Match), крупнейший блок;
-   * при длине меньше 500 символов — fallback на обрезанный body.innerText (до 5000 символов).
+   * Агрессивный «бульдозер»: гибкие названия команд (lower + короткие формы), Preview/Match;
+   * если ничего не найдено — самый крупный блок как «единственный контент»;
+   * при длине меньше 500 символов — fallback на body; итог обрезается до MAX_ARTICLE_TEXT_LENGTH.
+   * Скрипт в браузере — только строка evaluate (без TS/замыканий).
    */
   private async extractBulldozerArticle(page: Page, teamA: string, teamB: string): Promise<string> {
     type AggResult = {
@@ -164,63 +199,37 @@ export class FlashscoreProvider {
       chosenLen: number;
       hasTeamHome: boolean;
       hasTeamAway: boolean;
-      source: 'block' | 'body';
+      source: 'block' | 'body' | 'dominant';
     };
 
-    const result = (await page.evaluate(([home, away]) => {
-      const previewRe = /preview/i;
-      const matchRe = /\bmatch\b/i;
-      const minLen = 20;
+    const homeNeedles = FlashscoreProvider.teamSearchNeedles(teamA);
+    const awayNeedles = FlashscoreProvider.teamSearchNeedles(teamB);
+    const argJson = JSON.stringify({
+      homeNeedles,
+      awayNeedles,
+      maxBody: MAX_ARTICLE_TEXT_LENGTH,
+    });
 
-      const elements = Array.from(document.querySelectorAll('div, article, section, p'));
-      let bestText = '';
-      let bestLen = 0;
-      let bestHasHome = false;
-      let bestHasAway = false;
+    const bulldozerScript = `(function(){var P=${argJson};var homeNeedles=P.homeNeedles;var awayNeedles=P.awayNeedles;var maxBody=P.maxBody;function matchesNeedles(textLower,needles){for(var i=0;i<needles.length;i++){var n=needles[i];if(n.length>=2&&textLower.indexOf(n)!==-1)return true;}return false;}var previewRe=/preview/i;var matchRe=/\\bmatch\\b/i;var minLen=20;var dominantMinLen=120;var elements=Array.prototype.slice.call(document.querySelectorAll('div, article, section, p'));var bestText='';var bestLen=0;var bestHasHome=false;var bestHasAway=false;var i;var el;var text;var len;var tl;var hasHome;var hasAway;var hasSignal;var useful;for(i=0;i<elements.length;i++){el=elements[i];text=(el.innerText||'').trim();len=text.length;if(len<minLen)continue;tl=text.toLowerCase();hasHome=matchesNeedles(tl,homeNeedles);hasAway=matchesNeedles(tl,awayNeedles);hasSignal=previewRe.test(text)||matchRe.test(text);useful=hasHome||hasAway||hasSignal;if(!useful)continue;if(len>bestLen){bestLen=len;bestText=text;bestHasHome=hasHome;bestHasAway=hasAway;}}var source='block';if(bestLen===0){var domText='';var domLen=0;var j;var domEl;for(j=0;j<elements.length;j++){domEl=elements[j];text=(domEl.innerText||'').trim();len=text.length;if(len<dominantMinLen)continue;if(len>domLen){domLen=len;domText=text;}}if(domLen>0){bestText=domText;bestLen=domLen;tl=domText.toLowerCase();bestHasHome=matchesNeedles(tl,homeNeedles);bestHasAway=matchesNeedles(tl,awayNeedles);source='dominant';}}var outText=bestText;if(bestLen<500&&document.body){outText=(document.body.innerText||'').substring(0,maxBody);source='body';}var outLower=outText.toLowerCase();var hasTeamHome=matchesNeedles(outLower,homeNeedles);var hasTeamAway=matchesNeedles(outLower,awayNeedles);return{text:outText,chosenLen:outText.length,hasTeamHome:hasTeamHome,hasTeamAway:hasTeamAway,source:source};})()`;
 
-      for (let i = 0; i < elements.length; i++) {
-        const el = elements[i] as HTMLElement;
-        const text = (el.innerText || '').trim();
-        const len = text.length;
-        if (len < minLen) continue;
-        const hasHome = home.length > 0 && text.includes(home);
-        const hasAway = away.length > 0 && text.includes(away);
-        const hasSignal = previewRe.test(text) || matchRe.test(text);
-        const useful = hasHome || hasAway || hasSignal;
-        if (!useful) continue;
-        if (len > bestLen) {
-          bestLen = len;
-          bestText = text;
-          bestHasHome = hasHome;
-          bestHasAway = hasAway;
-        }
-      }
-
-      let outText = bestText;
-      let source: 'block' | 'body' = 'block';
-
-      if (bestLen < 500 && document.body) {
-        outText = (document.body.innerText || '').substring(0, 5000);
-        source = 'body';
-      }
-
-      const hasTeamHome = home.length > 0 && outText.includes(home);
-      const hasTeamAway = away.length > 0 && outText.includes(away);
-      return {
-        text: outText,
-        chosenLen: outText.length,
-        hasTeamHome,
-        hasTeamAway,
-        source,
-      };
-    }, [teamA, teamB])) as AggResult;
+    const result = (await page.evaluate(bulldozerScript)) as AggResult;
 
     console.log(`Нашел блок текста, длина: ${result.chosenLen} символов`);
     const hasAnyTeamName = result.hasTeamHome || result.hasTeamAway;
     console.log(`Содержит ли команды? ${hasAnyTeamName ? 'Да' : 'Нет'}`);
-    console.log(`Источник извлечения: ${result.source === 'body' ? 'document.body (fallback)' : 'крупнейший DOM-блок'}`);
+    const srcLabel =
+      result.source === 'body'
+        ? 'document.body (fallback)'
+        : result.source === 'dominant'
+          ? 'крупнейший блок без сигнала команд'
+          : 'крупнейший DOM-блок';
+    console.log(`Источник извлечения: ${srcLabel}`);
 
-    return this.cleanPreviewText(String(result.text ?? ''));
+    let cleaned = this.cleanPreviewText(String(result.text ?? ''));
+    if (cleaned.length > MAX_ARTICLE_TEXT_LENGTH) {
+      cleaned = cleaned.slice(0, MAX_ARTICLE_TEXT_LENGTH);
+    }
+    return cleaned;
   }
 
   /** Title, description, keywords из `<head>` (og:title / title, description / og:description, keywords). */
@@ -271,16 +280,90 @@ export class FlashscoreProvider {
     );
   }
 
+  /** Контекст живой; при обрыве — пересоздание. */
+  private async ensureActiveContext(): Promise<BrowserContext> {
+    await this.init();
+    return this.context!;
+  }
+
+  /**
+   * Открыть URL статьи; при 403 — пропуск (следующая ссылка в выдаче).
+   */
+  private async tryOpenArticleUrl(page: Page, url: string): Promise<'ok' | 'skip'> {
+    await this.humanPauseBeforeNavigation();
+    try {
+      const resp = await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: GOTO_TIMEOUT_MS,
+      });
+      if (resp?.status() === 403) {
+        logger.warn('403 Forbidden');
+        return 'skip';
+      }
+      return 'ok';
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('403') || /forbidden/i.test(msg)) {
+        logger.warn('403 Forbidden');
+        return 'skip';
+      }
+      logger.warn(`⚠️ Ошибка page.goto, пробуем следующую ссылку: ${msg}`);
+      return 'skip';
+    }
+  }
+
+  /** Сбор превью со уже открытой страницы статьи (внутри таймаута 30 с). */
+  private async runArticleExtractionPipeline(
+    page: Page,
+    homeTeam: string,
+    awayTeam: string,
+  ): Promise<string> {
+    await page.waitForTimeout(5000);
+    await this.handleOverlays(page);
+    await page.waitForTimeout(5000);
+    await this.stripKnownOverlayRoots(page);
+
+    const sourceUrl = page.url();
+
+    let metadata = await this.collectPageMetadata(page);
+    let mainArticleText = await this.extractBulldozerArticle(page, homeTeam, awayTeam);
+    let fullContentForAI = buildFullContentForAI(sourceUrl, metadata, mainArticleText);
+
+    if (mainArticleText.length < MIN_GOOD_PREVIEW_LENGTH) {
+      await this.handleOverlays(page);
+      await this.stripKnownOverlayRoots(page);
+      await page.waitForTimeout(400);
+      metadata = await this.collectPageMetadata(page);
+      mainArticleText = await this.extractBulldozerArticle(page, homeTeam, awayTeam);
+      fullContentForAI = buildFullContentForAI(page.url(), metadata, mainArticleText);
+    }
+
+    if (mainArticleText.length < MIN_GOOD_PREVIEW_LENGTH) {
+      await this.logPageHtmlWhenPreviewEmpty(page);
+    }
+
+    return fullContentForAI;
+  }
+
   /**
    * Поиск страницы превью и сбор единого блока для ИИ (SOURCE + METADATA + ARTICLE CONTENT).
    */
   async getMatchPreview(homeTeam: string, awayTeam: string): Promise<string> {
-    if (!this.context) await this.init();
+    const ctx = await this.ensureActiveContext();
 
-    const page: Page = await this.context!.newPage();
+    let page: Page;
+    try {
+      page = await ctx.newPage();
+    } catch (e: unknown) {
+      logger.warn(`newPage не удался (${String(e)}), пересоздаём контекст`);
+      await this.close();
+      await this.init();
+      page = await this.context!.newPage();
+    }
 
     try {
-      page.setDefaultTimeout(60000);
+      page.setDefaultTimeout(GOTO_TIMEOUT_MS + 5000);
+      await this.blockHeavyAssets(page);
 
       const searchQuery = encodeURIComponent(
         `${homeTeam} vs ${awayTeam} match preview -site:flashscore.com`,
@@ -289,7 +372,11 @@ export class FlashscoreProvider {
 
       logger.info(`🌐 Поиск через DuckDuckGo: ${homeTeam} - ${awayTeam}`);
 
-      await page.goto(searchUrl, { waitUntil: 'load', timeout: 45000 });
+      await this.humanPauseBeforeNavigation();
+      await page.goto(searchUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: GOTO_TIMEOUT_MS,
+      });
       await this.handleOverlays(page);
 
       const anchors = page.locator('a[data-testid="result-title-a"]');
@@ -300,49 +387,53 @@ export class FlashscoreProvider {
         const h = await anchors.nth(i).getAttribute('href');
         if (h) hrefs.push(h);
       }
-      const allowed = hrefs.filter((h) => !isBlacklistedPreviewUrl(h, page.url()));
-      const targetUrl = allowed[0];
+      const allowed = hrefs.filter(
+        (h) =>
+          !isBlacklistedPreviewUrl(h, page.url()) && !isAdSearchResultUrl(h, page.url()),
+      );
 
-      if (!targetUrl) {
+      if (allowed.length === 0) {
         throw new Error(
-          'Нет подходящих ссылок: все результаты отфильтрованы по blacklistDomains или URL некорректны',
+          'Нет подходящих ссылок: отфильтрованы blacklist, рекламные URL или ссылки некорректны',
         );
       }
 
-      logger.info(`⏳ Переход на превью (первый результат вне blacklist): ${targetUrl}`);
+      for (const targetUrl of allowed) {
+        logger.info(`⏳ Переход на превью: ${targetUrl}`);
 
-      await page.goto(targetUrl, { waitUntil: 'load', timeout: 45000 }).catch(() => {
-        logger.info('⚠️ load не достигнут, продолжаем...');
-      });
+        const opened = await this.tryOpenArticleUrl(page, targetUrl);
+        if (opened === 'skip') continue;
 
-      await page.waitForTimeout(5000);
+        let fullContentForAI: string;
+        try {
+          fullContentForAI = await Promise.race([
+            this.runArticleExtractionPipeline(page, homeTeam, awayTeam),
+            new Promise<string>((_, reject) => {
+              setTimeout(
+                () => reject(new Error('EXTRACT_TIMEOUT')),
+                EXTRACT_DEADLINE_MS,
+              );
+            }),
+          ]);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg === 'EXTRACT_TIMEOUT') {
+            logger.warn('⏱️ За 30 с контент не собран — пробуем следующую ссылку');
+            continue;
+          }
+          throw e;
+        }
 
-      await this.handleOverlays(page);
+        const head = fullContentForAI.slice(0, 200).replace(/\s+/g, ' ');
+        console.log(
+          `Скачанный текст (первые 200 симв.): ${head}${fullContentForAI.length > 200 ? '…' : ''}`,
+        );
 
-      await page.waitForTimeout(5000);
-
-      await this.stripKnownOverlayRoots(page);
-
-      const sourceUrl = page.url();
-
-      let metadata = await this.collectPageMetadata(page);
-      let mainArticleText = await this.extractBulldozerArticle(page, homeTeam, awayTeam);
-      let fullContentForAI = buildFullContentForAI(sourceUrl, metadata, mainArticleText);
-
-      if (mainArticleText.length < MIN_GOOD_PREVIEW_LENGTH) {
-        await this.handleOverlays(page);
-        await this.stripKnownOverlayRoots(page);
-        await page.waitForTimeout(400);
-        metadata = await this.collectPageMetadata(page);
-        mainArticleText = await this.extractBulldozerArticle(page, homeTeam, awayTeam);
-        fullContentForAI = buildFullContentForAI(page.url(), metadata, mainArticleText);
+        return fullContentForAI;
       }
 
-      if (mainArticleText.length < MIN_GOOD_PREVIEW_LENGTH) {
-        await this.logPageHtmlWhenPreviewEmpty(page);
-      }
-
-      return fullContentForAI;
+      logger.error('❌ Все органические ссылки недоступны или вернули 403');
+      return '';
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`❌ Ошибка провайдера: ${message}`);
