@@ -26,7 +26,8 @@ model Match {
   league     String   
   date       DateTime
   sport      String   @default("football")
-  rawContent String?  
+  /// Скрапер: SOURCE + METADATA (title/description/keywords) + ARTICLE CONTENT для ИИ
+  rawContent String? @db.Text
   embedding  Unsupported("vector(1536)")? 
 
   analyses   Analysis[]

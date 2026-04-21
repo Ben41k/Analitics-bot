@@ -1,8 +1,17 @@
+import { Prisma } from '@prisma/client';
 import { FootballDataProvider } from './providers/football-data.provider';
 import { FlashscoreProvider } from './providers/flashscore.provider';
 import prisma from '../../core/database';
-// --- ВСТАВЛЯЕМ ИМПОРТ СХЕМЫ ЗДЕСЬ ---
-import { MatchSchema } from '../../schemas/match.schema';
+
+function logPrismaUpdateError(context: string, err: unknown): void {
+  console.error(`[Prisma] ${context}:`, err);
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    console.error('  code:', err.code, '| message:', err.message, '| meta:', JSON.stringify(err.meta));
+  }
+  if (err instanceof Prisma.PrismaClientValidationError) {
+    console.error('  validation message:', err.message);
+  }
+}
 
 export class ScraperService {
   private footballApi = new FootballDataProvider();
@@ -61,30 +70,30 @@ export class ScraperService {
       console.log(`🔎 Ищем превью для: ${match.homeTeam} vs ${match.awayTeam}`);
       
       try {
+        // Единый текст для ИИ (SOURCE + METADATA + ARTICLE) пишем в Match.rawContent.
         const preview = await this.flashscore.getMatchPreview(match.homeTeam, match.awayTeam);
-        
-        // --- ЛОГИКА ВАЛИДАЦИИ ВСТАВЛЯЕТСЯ ТУТ ---
-        const validationResult = MatchSchema.safeParse({
-          externalId: match.externalId,
-          rawContent: preview,
-          provider: 'flashscore'
-        });
+        const trimmed = (preview ?? '').trim();
 
-        if (validationResult.success && validationResult.data.rawContent) {
-          await prisma.match.update({
-            where: { id: match.id },
-            data: { rawContent: validationResult.data.rawContent } 
-          });
+        if (trimmed.length > 0) {
+          try {
+            await prisma.match.update({
+              where: { id: match.id },
+              data: { rawContent: trimmed },
+            });
+          } catch (err) {
+            logPrismaUpdateError(`match.update rawContent (id=${match.id})`, err);
+          }
         } else {
-          // Если success: false ИЛИ rawContent пустой
-          console.warn(`⚠️ Ошибка валидации или пустой контент для ${match.homeTeam}`);
-          
-          await prisma.match.update({
-            where: { id: match.id },
-            data: { rawContent: 'No preview available' }
-          });
+          console.warn(`⚠️ Пустой контент для ${match.homeTeam} vs ${match.awayTeam}`);
+          try {
+            await prisma.match.update({
+              where: { id: match.id },
+              data: { rawContent: 'No preview available' },
+            });
+          } catch (err) {
+            logPrismaUpdateError(`match.update placeholder (id=${match.id})`, err);
+          }
         }
-        // ----------------------------------------
 
       } catch (err) {
         console.error(`⚠️ Ошибка при обработке ${match.homeTeam}:`, err);
