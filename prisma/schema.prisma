@@ -10,11 +10,12 @@ datasource db {
 }
 
 model User {
-  id        BigInt   @id
-  username  String?
-  firstName String
-  createdAt DateTime @default(now())
-  analyses  Analysis[]
+  id             BigInt   @id
+  username       String?
+  firstName      String
+  digestEnabled  Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  analyses       Analysis[]
 }
 
 model Match {
