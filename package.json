@@ -7,6 +7,7 @@
         "dev": "tsx watch src/core/app.ts",
         "dev:bot": "tsx watch src/core/app.ts",
         "scrape": "tsx src/scripts/sync-matches.ts",
+        "analyze": "tsx src/scripts/run-analysis-once.ts",
         "build": "tsc",
         "start": "node dist/core/app.js",
         "lint": "eslint \"src/**/*.ts\" --fix",
@@ -20,6 +21,7 @@
     "author": "Denis",
     "license": "ISC",
     "dependencies": {
+        "@google/generative-ai": "^0.24.1",
         "@grammyjs/hydrate": "^1.4.1",
         "@prisma/client": "^5.12.1",
         "axios": "^1.15.1",

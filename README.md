@@ -6,7 +6,7 @@ Telegram-бот для **спортивной аналитики по футбо
 
 - **Синхронизация матчей** — загрузка расписания топ-лиг через [Football Data API](https://www.football-data.org/), upsert в PostgreSQL.
 - **Обогащение контекста** — опционально до **5** ближайших матчей без превью дополняются текстовым превью через **Playwright** (парсинг Flashscore).
-- **Прогноз в Telegram** — команда `/matches` и inline-кнопки; анализ через **OpenRouter** (OpenAI-совместимый `/chat/completions`).
+- **Прогноз в Telegram** — команда `/matches` и inline-кнопки; анализ через **Google Gemini** (`@google/generative-ai`, schema-guided JSON, взвешенная уверенность по факторам F1–F10).
 - **История** — команда `/history` показывает последние сохранённые прогнозы пользователя.
 
 ## Стек
@@ -16,16 +16,18 @@ Telegram-бот для **спортивной аналитики по футбо
 | Runtime | Node.js, TypeScript |
 | Бот | [grammY](https://grammy.dev/) (long polling) |
 | БД | PostgreSQL, [Prisma](https://www.prisma.io/), расширение **pgvector** (колонка `embedding` в схеме) |
-| LLM | [OpenRouter](https://openrouter.ai/) (`axios` → `/chat/completions`) |
+| LLM | [Google AI Studio / Gemini](https://ai.google.dev/) (`@google/generative-ai`) |
 | Скрапинг | `axios` (Football Data), [Playwright](https://playwright.dev/) (Chromium) |
 | Качество кода | ESLint, Prettier, Vitest, Husky |
 
 ## Структура репозитория (кратко)
 
-- `src/core/` — точка входа (`app.ts`), конфиг (`config.ts`), Prisma-клиент, логгер, LLM-клиент.
+- `src/core/` — точка входа (`app.ts`), конфиг (`config.ts`), Prisma-клиент, логгер.
 - `src/core/bot.ts` — команды и callback-обработчики Telegram.
 - `src/modules/scraper/` — синхронизация матчей и провайдеры данных.
-- `src/modules/analyzer/` — промпт и разбор ответа LLM (JSON: исход, уверенность, текст).
+- `src/modules/rag/` — контекст из БД для промпта (лига, соседние матчи).
+- `src/modules/analyzer/` — Gemini (структурированный JSON) и расчёт итоговой уверенности.
+- `src/pipeline/` — `MatchAnalyticFlow`: RAG → модель → скор → сохранение в Prisma.
 - `src/scripts/sync-matches.ts` — CLI-синхронизация матчей (`npm run scrape`).
 - `prisma/` — схема и миграции.
 
@@ -72,18 +74,15 @@ npm run prisma:migrate
 
 ## Переменные окружения
 
-Источник правды по валидации — `src/core/config.ts`. Минимально для **запуска процесса** бота нужны корректные `DATABASE_URL` и `BOT_TOKEN`. Для **прогнозов** обязателен `OPENROUTER_API_KEY`. Для **осмысленной синхронизации матчей** через Football Data API нужен `FOOTBALL_DATA_API_KEY` (в коде при отсутствии ключа запросы уходят с пустым токеном и обычно не дают данных).
+Источник правды по валидации — `src/core/config.ts`. Минимально для **запуска процесса** бота нужны корректные `DATABASE_URL` и `BOT_TOKEN`. Для **прогнозов** нужен `GOOGLE_AI_API_KEY` (ключ [Google AI Studio](https://aistudio.google.com/app/apikey)). Для **осмысленной синхронизации матчей** через Football Data API нужен `FOOTBALL_DATA_API_KEY` (в коде при отсутствии ключа запросы уходят с пустым токеном и обычно не дают данных).
 
 | Переменная | Обязательность | Описание |
 |------------|----------------|----------|
 | `DATABASE_URL` | Да | Строка подключения PostgreSQL, например `postgresql://USER:PASSWORD@HOST:5432/DB?schema=public` |
 | `BOT_TOKEN` | Да | Токен бота от [@BotFather](https://t.me/BotFather) |
-| `OPENROUTER_API_KEY` | Для прогнозов | Ключ [OpenRouter](https://openrouter.ai/keys); без него бот стартует, но кнопка прогноза покажет предупреждение |
-| `LLM_BASE_URL` | Нет | По умолчанию `https://openrouter.ai/api/v1` |
-| `PRIMARY_REASONING_MODEL` | Нет | Слаг модели для основного анализа, по умолчанию `openai/gpt-4o` |
-| `LONG_CONTEXT_MODEL` | Нет | Для длинного превью матча, по умолчанию `openai/gpt-4o-mini` |
-| `OPENROUTER_HTTP_REFERER` | Нет | Заголовок для OpenRouter (рейтинг/идентификация) |
-| `OPENROUTER_APP_TITLE` | Нет | Заголовок `X-Title` для OpenRouter |
+| `GOOGLE_AI_API_KEY` | Для прогнозов | Ключ Gemini ([Google AI Studio](https://aistudio.google.com/app/apikey)); без него бот стартует, но кнопка прогноза покажет предупреждение |
+| `GEMINI_PRIMARY_MODEL` | Нет | Модель для обычного контекста, по умолчанию `gemini-1.5-flash` |
+| `GEMINI_LONG_CONTEXT_MODEL` | Нет | Для длинного превью матча, по умолчанию `gemini-1.5-pro` |
 | `NODE_ENV` | Нет | `development` \| `production` \| `test` |
 | `LOG_LEVEL` | Нет | `info` \| `error` \| `debug` \| `trace` |
 | `SCRAPER_HEADLESS` | Нет | `true` / `false` — headless-режим Chromium |
@@ -120,7 +119,7 @@ npm run scrape
 
 Рекомендуемый порядок при первом знакомстве с проектом:
 
-1. Настроить `.env` (БД, токен бота, при необходимости Football Data и OpenRouter).
+1. Настроить `.env` (БД, токен бота, при необходимости Football Data и `GOOGLE_AI_API_KEY`).
 2. `npx prisma migrate deploy` и `npm run prisma:generate`.
 3. `npm run scrape` — наполнить таблицу `Match`.
 4. `npm run dev` — открыть бота в Telegram и вызвать `/matches`.

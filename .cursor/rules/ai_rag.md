@@ -6,9 +6,9 @@ globs: src/modules/{analyzer,rag}/**/*
 # 🧠 AI & RAG STRATEGY
 
 ## 🚀 LLM CORE STRATEGY
-- **Model Roles, not hardcoded versions:** Используй роль модели, а не фиксированную версию:
-  - `PRIMARY_REASONING_MODEL` — для финального аналитического вывода и сложных логических цепочек.
-  - `LONG_CONTEXT_MODEL` — для первичной обработки больших массивов данных и длинного контекста.
+- **Model roles (Gemini):** Идентификаторы моделей задаются через env/config:
+  - `GEMINI_PRIMARY_MODEL` — короткий контекст (по умолчанию `gemini-1.5-flash`).
+  - `GEMINI_LONG_CONTEXT_MODEL` — длинное превью матча (по умолчанию `gemini-1.5-pro`).
 - **Configuration:** Идентификаторы моделей задаются через env/config, чтобы обновлять модель без изменения кода.
 - **Prompts:** Все системные инструкции и промпты должны храниться в `src/modules/analyzer/prompts/`.
 

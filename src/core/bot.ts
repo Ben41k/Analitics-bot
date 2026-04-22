@@ -1,14 +1,16 @@
 import http from 'node:http';
 import https from 'node:https';
-import { Bot, GrammyError, HttpError, InlineKeyboard, type ApiClientOptions, type Context } from 'grammy';
+import { Bot, GrammyError, HttpError, type ApiClientOptions, type Context } from 'grammy';
 import { config } from './config';
 import prisma from './database';
-import { createLlmClient } from './llm.client';
 import { logger } from './logger';
-import { escapeHtml, outcomeLabel, truncateTelegramHtml } from './telegram-html';
 import { AnalyzerService } from '../modules/analyzer/analyzer.service';
+import { RagService } from '../modules/rag/rag.service';
+import { VectorService } from '../modules/rag/vector.service';
+import { registerTelegramHandlers } from '../modules/telegram/register-handlers';
+import { MatchAnalyticFlow } from '../pipeline/MatchAnalyticFlow';
+import { startAnalysisCron } from '../tasks/analysis.task';
 import { startDigestCron } from '../tasks/digest-cron.task';
-import { getUserDigestFlag, upsertUserDigestFlag } from './user-digest.repository';
 
 /** Уникальные базовые URL Bot API в порядке перебора (без хвостового «/»). */
 function telegramApiRootCandidates(primary: string, fallback?: string): string[] {
@@ -26,12 +28,6 @@ function telegramApiRootCandidates(primary: string, fallback?: string): string[]
 
 const OFFICIAL_TELEGRAM_API_ROOT = 'https://api.telegram.org';
 
-/**
- * Для прокси / Cloudflare Worker: отключаем keep-alive на HTTPS-агенте.
- * Иначе grammY по умолчанию кэширует Agent(apiRoot) с keepAlive: true — после
- * долгого long polling getUpdates повторное использование сокета к Worker часто
- * даёт обрыв/таймаут на следующих вызовах (sendMessage и т.д.).
- */
 function grammyApiClientOptions(apiRoot: string): ApiClientOptions {
   const timeoutSeconds = config.TELEGRAM_HTTP_TIMEOUT_SECONDS;
   if (apiRoot === OFFICIAL_TELEGRAM_API_ROOT) {
@@ -54,45 +50,14 @@ function grammyApiClientOptions(apiRoot: string): ApiClientOptions {
   return { timeoutSeconds, apiRoot };
 }
 
-function summarizeIncoming(ctx: Context): string {
-  const u = ctx.update;
-  if (u.message?.text) {
-    const t = u.message.text;
-    return `message text=${JSON.stringify(t.length > 160 ? `${t.slice(0, 160)}…` : t)}`;
-  }
-  if (u.callback_query?.data) return `callback data=${u.callback_query.data}`;
-  if (u.message) return 'message (non-text)';
-  if (u.edited_message) return 'edited_message';
-  if (u.inline_query) return 'inline_query';
-  return `update keys=${Object.keys(u).join(',')}`;
-}
-
-function shortButtonLabel(home: string, away: string): string {
-  const raw = `${home} — ${away}`;
-  if (raw.length <= 64) return raw;
-  return `${raw.slice(0, 30)}… — …${raw.slice(-28)}`;
-}
-
-async function ensureUser(ctx: Context): Promise<void> {
-  const from = ctx.from;
-  if (!from) return;
-  await prisma.user.upsert({
-    where: { id: BigInt(from.id) },
-    create: {
-      id: BigInt(from.id),
-      username: from.username ?? null,
-      firstName: from.first_name ?? 'User',
-    },
-    update: {
-      username: from.username ?? null,
-      firstName: from.first_name ?? 'User',
-    },
-  });
-}
-
 export async function startBot(): Promise<void> {
   logger.info(
-    { nodeEnv: config.NODE_ENV, logLevel: config.LOG_LEVEL, cron: config.ENABLE_CRON },
+    {
+      nodeEnv: config.NODE_ENV,
+      logLevel: config.LOG_LEVEL,
+      digestCron: config.ENABLE_CRON,
+      analysisCron: config.ENABLE_ANALYSIS_CRON,
+    },
     'Инициализация Telegram-бота',
   );
 
@@ -149,220 +114,25 @@ export async function startBot(): Promise<void> {
     throw lastInitError ?? new Error('getMe failed');
   }
 
-  const llm = createLlmClient(config);
-  const analyzer = new AnalyzerService(llm);
+  const vectorService =
+    config.GOOGLE_AI_API_KEY !== undefined
+      ? new VectorService({
+          GOOGLE_AI_API_KEY: config.GOOGLE_AI_API_KEY,
+          GEMINI_EMBEDDING_MODEL: config.GEMINI_EMBEDDING_MODEL,
+          GEMINI_API_BASE_URL: config.GEMINI_API_BASE_URL,
+        })
+      : undefined;
+  const rag = new RagService(prisma, vectorService);
+  const analyticFlow =
+    config.GOOGLE_AI_API_KEY !== undefined
+      ? new MatchAnalyticFlow({
+          prisma,
+          rag,
+          analyzer: new AnalyzerService(config),
+        })
+      : undefined;
 
-  bot.use(async (ctx, next) => {
-    const from = ctx.from;
-    const summary = summarizeIncoming(ctx);
-    // console — надёжно в Git Bash / Cursor; pino может буферизоваться
-    console.log(
-      `[tg] update #${ctx.update.update_id} chat=${ctx.chat?.id ?? '—'} user=${from?.id ?? '—'} ${summary}`,
-    );
-    logger.info(
-      {
-        updateId: ctx.update.update_id,
-        userId: from?.id,
-        username: from?.username,
-        chatId: ctx.chat?.id,
-        summary,
-      },
-      'Входящее обновление Telegram',
-    );
-    await next();
-  });
-
-  bot.command('start', async (ctx) => {
-    await ensureUser(ctx);
-    await ctx.reply(
-      [
-        'Привет! Я бот спортивной аналитики.',
-        '',
-        'Команды:',
-        '/matches — ближайшие матчи из базы',
-        '/history — последние сохранённые прогнозы',
-        '/digest on|off — рассылка дайджеста по расписанию (крон)',
-        '/help — справка',
-      ].join('\n'),
-    );
-  });
-
-  bot.command('help', async (ctx) => {
-    await ensureUser(ctx);
-    await ctx.reply(
-      [
-        'Как пользоваться:',
-        '1) /matches — список матчей с кнопками.',
-        '2) Нажми кнопку с названием матча — получишь разбор и исход (П1 / X / П2) с оценкой уверенности.',
-        '3) /history — кратко последние прогнозы.',
-        '4) /digest on — подписаться на периодический дайджест в чат (см. ENABLE_CRON и CRON_DIGEST_SCHEDULE в .env).',
-        '',
-        'Нужны переменные окружения: DATABASE_URL, BOT_TOKEN, OPENROUTER_API_KEY (для прогнозов).',
-        'Матчи в базу попадают через синхронизацию: npm run scrape',
-      ].join('\n'),
-    );
-  });
-
-  bot.command('digest', async (ctx) => {
-    await ensureUser(ctx);
-    const from = ctx.from;
-    if (!from) return;
-
-    const arg = ctx.message?.text?.split(/\s+/)[1]?.toLowerCase();
-
-    if (arg === 'on') {
-      await upsertUserDigestFlag({
-        id: BigInt(from.id),
-        username: from.username ?? null,
-        firstName: from.first_name ?? 'User',
-        digestEnabled: true,
-      });
-      await ctx.reply(
-        [
-          'Подписка на дайджест включена.',
-          `Расписание задаётся на сервере (CRON_DIGEST_SCHEDULE, часовой пояс CRON_TZ).`,
-          'В дайджесте — список матчей и при возможности один авто-прогноз (лимит CRON_MAX_DIGEST_LLM).',
-          '',
-          'Отключить: /digest off',
-        ].join('\n'),
-      );
-      return;
-    }
-
-    if (arg === 'off') {
-      await upsertUserDigestFlag({
-        id: BigInt(from.id),
-        username: from.username ?? null,
-        firstName: from.first_name ?? 'User',
-        digestEnabled: false,
-      });
-      await ctx.reply('Подписка на дайджест выключена.');
-      return;
-    }
-
-    const on = await getUserDigestFlag(BigInt(from.id));
-    await ctx.reply(
-      [
-        'Дайджест по крону: периодическое сообщение со списком ближайших матчей.',
-        `Сейчас: ${on ? 'включено' : 'выключено'}.`,
-        '',
-        'Команды: /digest on | /digest off',
-      ].join('\n'),
-    );
-  });
-
-  bot.command('matches', async (ctx) => {
-    await ensureUser(ctx);
-    const now = new Date();
-    const matches = await prisma.match.findMany({
-      where: { date: { gte: now } },
-      orderBy: { date: 'asc' },
-      take: 20,
-    });
-
-    if (matches.length === 0) {
-      await ctx.reply('В базе нет предстоящих матчей. Запусти синхронизацию: npm run scrape');
-      return;
-    }
-
-    const lines = matches.map(
-      (m, i) =>
-        `${i + 1}. ${escapeHtml(m.homeTeam)} — ${escapeHtml(m.awayTeam)}\n   ${escapeHtml(m.league)} · ${m.date.toISOString().slice(0, 16)}Z`,
-    );
-
-    const keyboard = new InlineKeyboard();
-    for (const m of matches) {
-      keyboard.text(shortButtonLabel(m.homeTeam, m.awayTeam), `predict:${m.id}`).row();
-    }
-
-    await ctx.reply(
-      `<b>Ближайшие матчи</b>\n\n${lines.join('\n\n')}\n\nНажми кнопку под матчем для прогноза.`,
-      { reply_markup: keyboard, parse_mode: 'HTML' },
-    );
-  });
-
-  bot.callbackQuery(/^predict:([0-9a-f-]{36})$/i, async (ctx) => {
-    await ensureUser(ctx);
-    const matchId = ctx.match![1];
-
-    if (!config.OPENROUTER_API_KEY) {
-      await ctx.answerCallbackQuery({ text: 'Не задан OPENROUTER_API_KEY', show_alert: true });
-      return;
-    }
-
-    await ctx.answerCallbackQuery({ text: 'Считаю прогноз…' });
-
-    const match = await prisma.match.findUnique({ where: { id: matchId } });
-    if (!match) {
-      await ctx.reply('Матч не найден. Обнови список: /matches');
-      return;
-    }
-
-    const chatId = ctx.chat?.id ?? ctx.callbackQuery?.message?.chat?.id;
-    if (chatId) await ctx.api.sendChatAction(chatId, 'typing');
-
-    try {
-      const outcome = await analyzer.analyzeMatch(match);
-
-      const label = outcomeLabel(outcome.outcome, match.homeTeam, match.awayTeam);
-      const summaryHtml = escapeHtml(outcome.summary).replace(/\r\n/g, '\n').replace(/\n/g, '<br/>');
-
-      const body = [
-        `<b>${escapeHtml(match.homeTeam)} — ${escapeHtml(match.awayTeam)}</b>`,
-        `<b>Прогноз:</b> ${escapeHtml(label)}`,
-        `<b>Уверенность:</b> ${Math.round(outcome.confidence)}%`,
-        '',
-        `<b>Разбор</b>`,
-        summaryHtml,
-      ].join('\n');
-
-      const plainForDb = [
-        `${match.homeTeam} — ${match.awayTeam}`,
-        `Прогноз: ${label}`,
-        `Уверенность: ${Math.round(outcome.confidence)}%`,
-        '',
-        outcome.summary,
-      ].join('\n');
-
-      await prisma.analysis.create({
-        data: {
-          matchId: match.id,
-          userId: BigInt(ctx.from!.id),
-          prediction: outcome.outcome,
-          confidence: Math.min(100, Math.max(0, Math.round(outcome.confidence))),
-          result: plainForDb,
-        },
-      });
-
-      await ctx.reply(truncateTelegramHtml(body), { parse_mode: 'HTML' });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      logger.error({ err: msg, matchId }, 'Ошибка прогноза');
-      await ctx.reply(`Не удалось получить прогноз: ${escapeHtml(msg)}`, { parse_mode: 'HTML' });
-    }
-  });
-
-  bot.command('history', async (ctx) => {
-    await ensureUser(ctx);
-    const rows = await prisma.analysis.findMany({
-      where: { userId: BigInt(ctx.from!.id) },
-      orderBy: { createdAt: 'desc' },
-      take: 8,
-      include: { match: true },
-    });
-    if (rows.length === 0) {
-      await ctx.reply('Пока нет сохранённых прогнозов.');
-      return;
-    }
-    const text = rows
-      .map((a) => {
-        const m = a.match;
-        const when = a.createdAt.toISOString().slice(0, 16);
-        return `${when}Z · ${m.homeTeam} — ${m.awayTeam}: ${a.prediction ?? '?'} (${a.confidence ?? '—'}%)`;
-      })
-      .join('\n');
-    await ctx.reply(`<b>Последние прогнозы</b>\n\n${escapeHtml(text)}`, { parse_mode: 'HTML' });
-  });
+  registerTelegramHandlers(bot);
 
   bot.catch((err) => {
     const e = err.error;
@@ -390,7 +160,8 @@ export async function startBot(): Promise<void> {
     onStart: (me) => {
       console.log(`[ai-analyst-bot] long polling запущен @${me.username}`);
       logger.info({ id: me.id, username: me.username }, 'Telegram-бот запущен (long polling)');
-      startDigestCron(bot, analyzer);
+      startDigestCron(bot);
+      startAnalysisCron(analyticFlow);
     },
   });
 }
