@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import type { Match } from '@prisma/client';
+import { Prisma, type Match, type PrismaClient } from '@prisma/client';
 import {
   CONFIDENCE_FACTOR_KEYS,
   CONFIDENCE_WEIGHTS,
@@ -83,6 +83,25 @@ export class AnalyzerService {
   private readonly client: GoogleGenerativeAI;
   private readonly modelName: string;
   private readonly geminiBaseUrl: string;
+
+  /**
+   * Очередь фонового анализа: только матчи со статусом PENDING (без дублей по externalId — синхронизация через upsert).
+   */
+  static async findPendingMatchesForCron(
+    prisma: PrismaClient,
+    params: { take: number; now?: Date },
+  ): Promise<MatchForAnalysis[]> {
+    const now = params.now ?? new Date();
+    const where = {
+      internalStatus: 'PENDING' as const,
+      date: { gte: now },
+    } as unknown as Prisma.MatchWhereInput;
+    return prisma.match.findMany({
+      where,
+      orderBy: { date: 'asc' },
+      take: params.take,
+    });
+  }
 
   constructor(
     cfg: Pick<Config, 'GOOGLE_AI_API_KEY' | 'GEMINI_MODEL' | 'GEMINI_API_BASE_URL'>,

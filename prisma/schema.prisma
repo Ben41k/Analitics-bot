@@ -36,6 +36,18 @@ model User {
 
 
 
+enum MatchInternalStatus {
+
+  PENDING
+
+  SCRAPED
+
+  ANALYZED
+
+}
+
+
+
 model Match {
 
   id         String   @id @default(uuid())
@@ -51,6 +63,10 @@ model Match {
   date       DateTime
 
   sport      String   @default("football")
+
+  /// Жизненный цикл в приложении: очередь анализа (PENDING) → после LLM (ANALYZED); SCRAPED — зарезервировано под этап обогащения
+
+  internalStatus MatchInternalStatus @default(PENDING)
 
   /// Скрапер: SOURCE + METADATA (title/description/keywords) + ARTICLE CONTENT для ИИ
 

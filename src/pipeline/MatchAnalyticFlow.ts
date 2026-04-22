@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import type { PrismaClient } from '@prisma/client';
+import { MatchInternalStatus, type PrismaClient } from '@prisma/client';
 import { logger } from '../core/logger';
 
 const LLM_AFTER_RAG_COOLDOWN_MS = 20_000;
@@ -92,6 +92,7 @@ export class MatchAnalyticFlow {
     await prisma.match.update({
       where: { id: matchId },
       data: {
+        internalStatus: MatchInternalStatus.ANALYZED,
         analyzedAt: new Date(),
         analysisPrediction: structured.outcome,
         analysisSummary: structured.summary,

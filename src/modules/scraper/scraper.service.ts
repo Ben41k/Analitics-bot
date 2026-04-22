@@ -62,6 +62,9 @@ export class ScraperService {
       await prisma.match.upsert({
         where: { externalId: String(raw.id) },
         update: {
+          homeTeam: raw.homeTeam.name,
+          awayTeam: raw.awayTeam.name,
+          league: raw.competition.name,
           date: new Date(raw.utcDate),
         },
         create: {
@@ -71,7 +74,7 @@ export class ScraperService {
           date: new Date(raw.utcDate),
           sport: 'football',
           league: raw.competition.name,
-          rawContent: null, // Оставляем null по умолчанию
+          rawContent: null,
         },
       });
       createdCount++;

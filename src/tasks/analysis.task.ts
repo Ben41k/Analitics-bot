@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { config } from '../core/config';
 import prisma from '../core/database';
 import { logger } from '../core/logger';
+import { AnalyzerService } from '../modules/analyzer/analyzer.service';
 import type { MatchAnalyticFlow } from '../pipeline/MatchAnalyticFlow';
 import { ScraperService } from '../modules/scraper/scraper.service';
 
@@ -27,13 +28,9 @@ export async function runAnalysisJob(analyticFlow: MatchAnalyticFlow | undefined
   }
 
   const now = new Date();
-  const pending = await prisma.match.findMany({
-    where: {
-      analyzedAt: null,
-      date: { gte: now },
-    },
-    orderBy: { date: 'asc' },
+  const pending = await AnalyzerService.findPendingMatchesForCron(prisma, {
     take: config.CRON_ANALYSIS_BATCH,
+    now,
   });
 
   logger.info(
