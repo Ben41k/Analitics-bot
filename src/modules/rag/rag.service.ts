@@ -1,5 +1,10 @@
 import type { Match, PrismaClient } from '@prisma/client';
 import { logger } from '../../core/logger';
+import {
+  NO_PREVIEW_PLACEHOLDER,
+  PREVIEW_REJECTED_PLACEHOLDER,
+  isUsableMatchRawContent,
+} from '../scraper/raw-content-preview';
 import type { VectorService } from './vector.service';
 
 const RAG_PEER_LIMIT = 4;
@@ -40,10 +45,10 @@ export class RagService {
   ) {}
 
   private peerRowToBlock(p: { homeTeam: string; awayTeam: string; date: Date; rawContent: string | null }): string | null {
-    const text = p.rawContent?.slice(0, RAG_SNIPPET_CHARS) ?? '';
-    if (!text) {
+    if (!isUsableMatchRawContent(p.rawContent)) {
       return null;
     }
+    const text = p.rawContent!.slice(0, RAG_SNIPPET_CHARS);
     return `[${p.homeTeam} — ${p.awayTeam}, ${p.date.toISOString()}]\n${text}`;
   }
 
@@ -57,7 +62,12 @@ export class RagService {
       where: {
         league: match.league,
         id: { not: match.id, notIn: excludeIds },
-        rawContent: { not: null },
+        AND: [
+          { rawContent: { not: null } },
+          { rawContent: { not: '' } },
+          { rawContent: { not: NO_PREVIEW_PLACEHOLDER } },
+          { rawContent: { not: PREVIEW_REJECTED_PLACEHOLDER } },
+        ],
       },
       orderBy: { date: 'desc' },
       take: limit,
@@ -74,10 +84,9 @@ export class RagService {
   async buildContextForMatch(match: MatchForRagContext): Promise<string> {
     logger.info({ matchId: match.id, stage: 'rag' }, 'RAG: сбор контекста для матча');
 
-    const ownExcerpt =
-      match.rawContent && match.rawContent !== 'No preview available'
-        ? match.rawContent.slice(0, RAG_SNIPPET_CHARS)
-        : null;
+    const ownExcerpt = isUsableMatchRawContent(match.rawContent)
+      ? match.rawContent!.slice(0, RAG_SNIPPET_CHARS)
+      : null;
 
     let peerBlocks: string[] = [];
 

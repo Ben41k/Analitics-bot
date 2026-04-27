@@ -7,11 +7,14 @@ import { listDigestSubscriberUserIds } from '../core/user-digest.repository';
 import { escapeHtml, truncateTelegramHtml } from '../core/telegram-html';
 import { formatMatchConfidenceBadgeHtml } from '../modules/telegram/confidence-visual';
 import { ScraperService } from '../modules/scraper/scraper.service';
+import { deleteMatchesPastCalendarDay } from './past-matches-cleanup.task';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export async function runDigestJob(bot: Bot): Promise<void> {
   logger.info('Крон: запуск дайджеста матчей');
+
+  await deleteMatchesPastCalendarDay(prisma, { timeZone: config.CRON_TZ });
 
   if (config.CRON_RUN_SCRAPE) {
     const scraper = new ScraperService();

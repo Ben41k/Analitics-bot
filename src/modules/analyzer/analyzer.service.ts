@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Prisma, type Match, type PrismaClient } from '@prisma/client';
+import { type Match, type PrismaClient } from '@prisma/client';
 import {
   CONFIDENCE_FACTOR_KEYS,
   CONFIDENCE_WEIGHTS,
@@ -8,6 +8,11 @@ import {
 import { logger } from '../../core/logger';
 import { geminiStructuredAnalysisSchema, type GeminiStructuredAnalysis } from '../../schemas/analysis.schema';
 import { geminiAnalysisResponseSchema } from './gemini-response-schema';
+import {
+  NO_PREVIEW_PLACEHOLDER,
+  PREVIEW_REJECTED_PLACEHOLDER,
+  isUsableMatchRawContent,
+} from '../scraper/raw-content-preview';
 
 export type MatchForAnalysis = Pick<
   Match,
@@ -85,19 +90,24 @@ export class AnalyzerService {
   private readonly geminiBaseUrl: string;
 
   /**
-   * Очередь фонового анализа: только матчи со статусом PENDING (без дублей по externalId — синхронизация через upsert).
+   * Очередь фонового анализа: PENDING, дата в будущем, есть осмысленный rawContent (превью со скрапера).
    */
   static async findPendingMatchesForCron(
     prisma: PrismaClient,
     params: { take: number; now?: Date },
   ): Promise<MatchForAnalysis[]> {
     const now = params.now ?? new Date();
-    const where = {
-      internalStatus: 'PENDING' as const,
-      date: { gte: now },
-    } as unknown as Prisma.MatchWhereInput;
     return prisma.match.findMany({
-      where,
+      where: {
+        internalStatus: 'PENDING',
+        date: { gte: now },
+        AND: [
+          { rawContent: { not: null } },
+          { rawContent: { not: '' } },
+          { rawContent: { not: NO_PREVIEW_PLACEHOLDER } },
+          { rawContent: { not: PREVIEW_REJECTED_PLACEHOLDER } },
+        ],
+      },
       orderBy: { date: 'asc' },
       take: params.take,
     });
@@ -137,10 +147,9 @@ export class AnalyzerService {
    * Вызов Gemini с schema-guided JSON: факторы F1–F10, aiConfidence, outcome, summary.
    */
   async generateAnalysis(match: MatchForAnalysis, ragContext: string): Promise<GeminiStructuredAnalysis> {
-    const preview =
-      match.rawContent && match.rawContent !== 'No preview available'
-        ? match.rawContent.slice(0, MAX_PREVIEW_CHARS)
-        : null;
+    const preview = isUsableMatchRawContent(match.rawContent)
+      ? match.rawContent!.slice(0, MAX_PREVIEW_CHARS)
+      : null;
 
     const matchBlock = [
       `Матч: ${match.homeTeam} — ${match.awayTeam}`,

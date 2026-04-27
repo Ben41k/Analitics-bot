@@ -1,7 +1,11 @@
 import { Prisma } from '@prisma/client';
+import { config } from '../../core/config';
+import prisma from '../../core/database';
+import { logger } from '../../core/logger';
+import { deleteMatchesPastCalendarDay } from '../../tasks/past-matches-cleanup.task';
 import { FootballDataProvider } from './providers/football-data.provider';
 import { FlashscoreProvider, teamSearchNeedles } from './providers/flashscore.provider';
-import prisma from '../../core/database';
+import { NO_PREVIEW_PLACEHOLDER, PREVIEW_REJECTED_PLACEHOLDER } from './raw-content-preview';
 
 function logPrismaUpdateError(context: string, err: unknown): void {
   console.error(`[Prisma] ${context}:`, err);
@@ -49,6 +53,7 @@ export class ScraperService {
 
   async syncUpcomingMatches() {
     console.log('🔄 Начинаем синхронизацию матчей в БД...');
+    await deleteMatchesPastCalendarDay(prisma, { timeZone: config.CRON_TZ });
     const rawMatches = await this.footballApi.getTopLeaguesMatches();
 
     if (!rawMatches || rawMatches.length === 0) {
@@ -80,7 +85,9 @@ export class ScraperService {
       createdCount++;
     }
 
-    console.log(`✅ Импорт из API: upsert для ${createdCount} матчей (записи в БД обновлены/созданы).`);
+    console.log(
+      `✅ Импорт из API: upsert для ${createdCount} матчей (метаданные; поле rawContent при update не сбрасывается — превью ниже).`,
+    );
 
     // 3. Обогащение превью — все матчи с пустым rawContent, порциями без жёсткого «только 5»
     await this.enrichMatchesWithPreview();
@@ -96,7 +103,7 @@ export class ScraperService {
           OR: [
             { rawContent: null },
             { rawContent: '' },
-            { rawContent: { contains: 'No preview available' } },
+            { rawContent: NO_PREVIEW_PLACEHOLDER },
           ],
         },
         take: ENRICH_PREVIEW_BATCH_SIZE,
@@ -106,7 +113,7 @@ export class ScraperService {
       if (matchesToEnrich.length === 0) {
         if (!browserStarted) {
           console.log(
-            'ℹ️ Нет матчей для превью (null, пусто или плейсхолдер «No preview available») — пропуск.',
+            'ℹ️ Нет матчей для превью (null, пусто или «No preview available»; отклонённые превью не переобогащаются) — пропуск.',
           );
         }
         break;
@@ -128,25 +135,40 @@ export class ScraperService {
           const preview = await this.flashscore.getMatchPreview(match.homeTeam, match.awayTeam);
           const trimmed = (preview ?? '').trim();
 
-          if (trimmed.length > 0) {
-            const relevant = isContentRelevant(trimmed, match.homeTeam, match.awayTeam);
-            if (!relevant) {
-              console.log(
-                `[REJECT] Первые 500 симв. отклонённого текста:\n${trimmed.slice(0, 500)}`,
-              );
-            }
-          } else {
+          let rawContentFinal: string;
+          if (trimmed.length === 0) {
             console.warn(`⚠️ Пустой контент для ${match.homeTeam} vs ${match.awayTeam}`);
+            rawContentFinal = NO_PREVIEW_PLACEHOLDER;
+          } else if (trimmed === NO_PREVIEW_PLACEHOLDER) {
+            rawContentFinal = NO_PREVIEW_PLACEHOLDER;
+          } else if (!isContentRelevant(trimmed, match.homeTeam, match.awayTeam)) {
+            console.log(
+              `[REJECT] Текст не про эти команды — сохраняем маркер отказа. Первые 500 симв.:\n${trimmed.slice(0, 500)}`,
+            );
+            rawContentFinal = PREVIEW_REJECTED_PLACEHOLDER;
+          } else {
+            rawContentFinal = trimmed;
           }
 
-          const rawContentFinal = trimmed.length > 0 ? trimmed : 'No preview available';
-
           try {
-            console.log('DEBUG: Сохраняю в БД для ID:', match.id);
             await prisma.match.update({
               where: { id: match.id },
               data: { rawContent: rawContentFinal },
             });
+            logger.info(
+              {
+                matchId: match.id,
+                stage: 'scraper_raw_content_saved',
+                charLength: rawContentFinal.length,
+                kind:
+                  rawContentFinal === NO_PREVIEW_PLACEHOLDER
+                    ? 'no_preview'
+                    : rawContentFinal === PREVIEW_REJECTED_PLACEHOLDER
+                      ? 'rejected'
+                      : 'article',
+              },
+              'Скрапер: rawContent записан в БД',
+            );
           } catch (err) {
             logPrismaUpdateError(`match.update rawContent (id=${match.id})`, err);
           }
@@ -155,7 +177,7 @@ export class ScraperService {
           try {
             await prisma.match.update({
               where: { id: match.id },
-              data: { rawContent: 'No preview available' },
+              data: { rawContent: NO_PREVIEW_PLACEHOLDER },
             });
           } catch (e2) {
             logPrismaUpdateError(`match.update после ошибки скрапа (id=${match.id})`, e2);

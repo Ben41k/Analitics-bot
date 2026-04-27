@@ -5,9 +5,12 @@ import { logger } from '../core/logger';
 import { AnalyzerService } from '../modules/analyzer/analyzer.service';
 import type { MatchAnalyticFlow } from '../pipeline/MatchAnalyticFlow';
 import { ScraperService } from '../modules/scraper/scraper.service';
+import { deleteMatchesPastCalendarDay } from './past-matches-cleanup.task';
 
 export async function runAnalysisJob(analyticFlow: MatchAnalyticFlow | undefined): Promise<void> {
   logger.info({ stage: 'analysis_cron_start' }, 'Крон анализа: старт оркестратора');
+
+  await deleteMatchesPastCalendarDay(prisma, { timeZone: config.CRON_TZ });
 
   if (!config.GOOGLE_AI_API_KEY || !analyticFlow) {
     logger.info({ stage: 'analysis_cron_skip' }, 'Крон анализа: пропуск (нет GOOGLE_AI_API_KEY или пайплайна)');

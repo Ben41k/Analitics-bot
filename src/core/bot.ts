@@ -11,6 +11,7 @@ import { registerTelegramHandlers } from '../modules/telegram/register-handlers'
 import { MatchAnalyticFlow } from '../pipeline/MatchAnalyticFlow';
 import { startAnalysisCron } from '../tasks/analysis.task';
 import { startDigestCron } from '../tasks/digest-cron.task';
+import { deleteMatchesPastCalendarDay } from '../tasks/past-matches-cleanup.task';
 
 /** Уникальные базовые URL Bot API в порядке перебора (без хвостового «/»). */
 function telegramApiRootCandidates(primary: string, fallback?: string): string[] {
@@ -68,6 +69,8 @@ export async function startBot(): Promise<void> {
     logger.error(e, 'База данных: не удалось подключиться (DATABASE_URL / миграции)');
     throw e;
   }
+
+  await deleteMatchesPastCalendarDay(prisma, { timeZone: config.CRON_TZ });
 
   const primaryApiRoot = config.TELEGRAM_API_ROOT ?? 'https://api.telegram.org';
   const apiRoots = telegramApiRootCandidates(primaryApiRoot, config.TELEGRAM_API_FALLBACK_ROOT);

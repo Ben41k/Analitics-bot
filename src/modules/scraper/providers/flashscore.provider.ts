@@ -2,6 +2,7 @@ import { chromium } from 'playwright-extra';
 import stealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { BrowserContext, Page, errors } from 'playwright';
 import { logger } from '../../../core/logger';
+import { NO_PREVIEW_PLACEHOLDER } from '../raw-content-preview';
 
 chromium.use(stealthPlugin());
 
@@ -191,8 +192,6 @@ export function teamSearchNeedles(team: string): string[] {
 
 /** Максимум переходов по органическим ссылкам из выдачи на один матч. */
 const MAX_PREVIEW_URL_ATTEMPTS = 5;
-
-export const NO_PREVIEW_PLACEHOLDER = 'No preview available';
 
 export class FlashscoreProvider {
   private context: BrowserContext | null = null;
@@ -401,6 +400,12 @@ export class FlashscoreProvider {
     console.log(`Источник извлечения: ${srcLabel}`);
 
     let cleaned = this.cleanPreviewText(String(result.text ?? ''));
+    if (cleaned.length === 0 && result.chosenLen > 0) {
+      logger.warn(
+        { chosenLen: result.chosenLen, source: result.source },
+        'После cleanPreviewText текст стал пустым (шум вырезан) — в БД уйдёт «No preview available», не длина из браузера',
+      );
+    }
     if (cleaned.length > MAX_ARTICLE_TEXT_LENGTH) {
       cleaned = cleaned.slice(0, MAX_ARTICLE_TEXT_LENGTH);
     }
@@ -625,7 +630,7 @@ export class FlashscoreProvider {
       }
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`❌ Ошибка провайдера: ${message}`);
-      return '';
+      return NO_PREVIEW_PLACEHOLDER;
     } finally {
       if (!page.isClosed()) {
         await page.close();
